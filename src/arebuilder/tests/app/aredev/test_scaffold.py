@@ -168,6 +168,10 @@ def test_init_creates_expected_scaffold_without_resource_artifacts(
     assert "LD_PRELOAD=/usr/local/lib/libnwn-musl-compat.so" in dockerfile_text
     assert arebuilder_env["BUILD_TARGET"] == "pgcc"
     assert arebuilder_env["BUILDER_BACKEND"] == "native"
+    assert (
+        arebuilder_env["AREBUILDER_REPO"]
+        == "https://github.com/Kalopsia-dev/ARE_Builder.git"
+    )
     assert arebuilder_env["NWSERVER_IMAGE"] == "dmhoodoo/aredevnwnxserver:latest"
     env_template = resources.files("arebuilder").joinpath(
         "templates", "aredev", "config", "arebuilder.env"
