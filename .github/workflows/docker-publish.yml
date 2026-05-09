@@ -1,0 +1,77 @@
+name: Publish Docker image
+
+on:
+  workflow_run:
+    workflows:
+      - Tests
+    branches:
+      - master
+    types:
+      - completed
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docker-publish-master
+  cancel-in-progress: true
+
+env:
+  IMAGE_NAME: kalopsiadev/arebuilder
+
+jobs:
+  publish:
+    name: Build and publish
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out tested commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+
+      - name: Confirm tested commit is current master
+        id: master
+        run: |
+          git fetch origin master --depth=1
+          if [ "$(git rev-parse FETCH_HEAD)" = "${{ github.event.workflow_run.head_sha }}" ]; then
+            echo "current=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "current=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up QEMU
+        if: ${{ steps.master.outputs.current == 'true' }}
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        if: ${{ steps.master.outputs.current == 'true' }}
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        if: ${{ steps.master.outputs.current == 'true' }}
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Create Docker metadata
+        if: ${{ steps.master.outputs.current == 'true' }}
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=latest
+            type=sha,prefix=,format=short
+
+      - name: Build and push Docker image
+        if: ${{ steps.master.outputs.current == 'true' }}
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
