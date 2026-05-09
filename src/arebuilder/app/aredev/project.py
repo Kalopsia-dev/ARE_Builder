@@ -12,6 +12,7 @@ from arebuilder.config.runtime import BuilderSettings
 
 BuilderBackend = Literal["native", "docker"]
 AREBUILDER_ENV_FILENAME = "arebuilder.env"
+DEFAULT_AREBUILDER_REPO = "https://github.com/Kalopsia-dev/ARE_Builder.git"
 NWN_INSTALL_PATH_DESCRIPTION = (
     "NWN_INSTALL_PATH should point to your Neverwinter Nights install folder on "
     "the host machine. Use the folder that contains the game's data/ and bin/ "
@@ -43,6 +44,7 @@ class BuilderConfig:
 
     build_target: str = "pgcc"
     builder_backend: BuilderBackend = "native"
+    arebuilder_repo: str = DEFAULT_AREBUILDER_REPO
     builder_image: str = "kalopsiadev/arebuilder:latest"
     nwserver_image: str = "dmhoodoo/aredevnwnxserver:latest"
     nwn_install_path: str = ""
@@ -340,6 +342,7 @@ def _build_config(values: dict[str, str]) -> BuilderConfig:
     return BuilderConfig(
         build_target=build_target,
         builder_backend=backend,  # type: ignore[arg-type]
+        arebuilder_repo=values.get("AREBUILDER_REPO", DEFAULT_AREBUILDER_REPO),
         builder_image=values.get("BUILDER_IMAGE", "kalopsiadev/arebuilder:latest"),
         nwserver_image=values.get("NWSERVER_IMAGE", "dmhoodoo/aredevnwnxserver:latest"),
         nwn_install_path=values.get("NWN_INSTALL_PATH", ""),
@@ -353,6 +356,7 @@ def _default_config_values() -> dict[str, str]:
     return {
         "BUILD_TARGET": "pgcc",
         "BUILDER_BACKEND": "native",
+        "AREBUILDER_REPO": DEFAULT_AREBUILDER_REPO,
         "BUILDER_IMAGE": "kalopsiadev/arebuilder:latest",
         "NWSERVER_IMAGE": "dmhoodoo/aredevnwnxserver:latest",
         "NWN_INSTALL_PATH": "",

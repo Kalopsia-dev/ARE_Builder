@@ -1,3 +1,4 @@
+import sys
 from pathlib import Path
 
 import pytest
@@ -193,25 +194,61 @@ def test_docker_backend_inside_builder_container_reuses_current_process(
     assert settings.server_root == layout.server_dir
 
 
-def test_native_update_pulls_compose_images(tmp_path: Path) -> None:
-    """Verify update runs the Compose pull workflow in native mode."""
+def test_native_update_installs_repo_then_pulls_compose_images(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify native update refreshes arebuilder before pulling Compose images."""
 
+    custom_repo = "https://example.invalid/ARE_Builder.git"
     runner = FakeRunner()
-    controller, _, build_calls, runner = make_controller(tmp_path, runner=runner)
+    controller, layout, build_calls, runner = make_controller(tmp_path, runner=runner)
+    layout.arebuilder_env_path.write_text(
+        layout.arebuilder_env_path.read_text(encoding="utf-8")
+        + f"AREBUILDER_REPO={custom_repo}\n",
+        encoding="utf-8",
+    )
+    controller.config = load_arebuilder_env(layout.root)
+    fingerprints = iter(["same", "same"])
+    monkeypatch.setattr(
+        "arebuilder.app.aredev.controller._installed_arebuilder_version",
+        lambda: next(fingerprints),
+    )
 
     assert controller.run("update", []) == 0
 
-    assert [
-        "docker",
-        "compose",
-        "--progress",
-        "quiet",
-        "-p",
-        "aredev",
-        "pull",
-        "--ignore-pull-failures",
-    ] in runner.calls
+    assert runner.calls[0][-1] == f"git+{custom_repo}"
+    assert any(call[-2:] == ["pull", "--ignore-pull-failures"] for call in runner.calls)
     assert build_calls == []
+
+
+def test_native_update_restart_depends_on_package_change(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify native update restart is gated by the package fingerprint."""
+
+    class Restarted(Exception):
+        pass
+
+    exec_calls: list[tuple[str, list[str]]] = []
+    controller, _, _, _ = make_controller(tmp_path)
+    controller._running_interactive = True
+
+    def execv(executable: str, args: list[str]) -> None:
+        exec_calls.append((executable, args))
+        raise Restarted
+
+    monkeypatch.setattr("arebuilder.app.aredev.controller.os.execv", execv)
+
+    assert controller._handle_native_update_restart(False, 0) == 0
+    assert exec_calls == []
+    assert controller._handle_native_update_restart(True, 7) == 7
+    assert exec_calls == []
+    with pytest.raises(Restarted):
+        controller._handle_native_update_restart(True, 0)
+    assert exec_calls[0][0] == sys.executable
+    assert exec_calls[0][1][:4] == [sys.executable, "-m", "arebuilder", "aredev"]
 
 
 def test_interactive_prompt_runs_commands_until_exit(tmp_path: Path) -> None:

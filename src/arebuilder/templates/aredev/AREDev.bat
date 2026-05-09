@@ -34,18 +34,24 @@ IF /I "%BUILDER_BACKEND%"=="docker" GOTO DOCKER_AREDEV
 :NATIVE_AREDEV
 REM Do not call bare `aredev` from AREDev.bat. Windows command lookup is
 REM case-insensitive, so `aredev` can resolve back to AREDev.bat and recurse.
-WHERE arebuilder >NUL 2>NUL
+REM Prefer module launchers so native `update` can replace arebuilder.exe.
+WHERE python >NUL 2>NUL
 IF ERRORLEVEL 1 GOTO TRY_NATIVE_PY
-arebuilder aredev --root "%AREDEV_ROOT%"
+python -m arebuilder aredev --root "%AREDEV_ROOT%"
 SET "AREDEV_STATUS=%ERRORLEVEL%"
 GOTO EXIT_AREDEV
 
 :TRY_NATIVE_PY
-REM Fallback for environments where the console script is missing but the Python
-REM launcher can still import the package.
 WHERE py >NUL 2>NUL
-IF ERRORLEVEL 1 GOTO NATIVE_AREDEV_MISSING
+IF ERRORLEVEL 1 GOTO TRY_NATIVE_AREBUILDER
 py -m arebuilder aredev --root "%AREDEV_ROOT%"
+SET "AREDEV_STATUS=%ERRORLEVEL%"
+GOTO EXIT_AREDEV
+
+:TRY_NATIVE_AREBUILDER
+WHERE arebuilder >NUL 2>NUL
+IF ERRORLEVEL 1 GOTO NATIVE_AREDEV_MISSING
+arebuilder aredev --root "%AREDEV_ROOT%"
 SET "AREDEV_STATUS=%ERRORLEVEL%"
 GOTO EXIT_AREDEV
 

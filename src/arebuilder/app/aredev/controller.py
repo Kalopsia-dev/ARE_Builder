@@ -1,4 +1,5 @@
 import argparse
+import importlib.metadata
 import json
 import os
 import shlex
@@ -35,6 +36,7 @@ from arebuilder.app.aredev.host_bridge import (
 )
 from arebuilder.app.aredev.process import ProcessResult, default_process_runner
 from arebuilder.app.aredev.project import (
+    DEFAULT_AREBUILDER_REPO,
     NWN_HOME_PATH_DESCRIPTION,
     NWN_INSTALL_PATH_DESCRIPTION,
     BuilderConfig,
@@ -327,6 +329,7 @@ class AREDevController:
         self._prompt_session: PromptSession | None = None
         self._server_state_cache: _ServerStateCache | None = None
         self._path_warnings_shown = False
+        self._running_interactive = False
 
     @classmethod
     def from_root(
@@ -386,6 +389,7 @@ class AREDevController:
         if lock_status is not None:
             return lock_status
 
+        self._running_interactive = True
         self.clear()
         while True:
             try:
@@ -433,7 +437,7 @@ class AREDevController:
         self.show_banner()
 
     def update(self) -> int:
-        """Pull Docker images for the AREDev server stack and request restart when containerized."""
+        """Update the configured AREDev builder runtime."""
 
         if _in_builder_container():
             if not self._ensure_host_bridge():
@@ -447,6 +451,50 @@ class AREDevController:
             self.output("Updating containers. AREDev will restart after the update.")
             return AREDEV_RESTART_EXIT_CODE
 
+        if self.config.builder_backend == "native":
+            return self._update_native_environment()
+
+        return self._update_containers()
+
+    def _update_native_environment(self) -> int:
+        """Install the configured GitHub builder package and refresh Docker images."""
+
+        package_before = _installed_arebuilder_version()
+        repo = (self.config.arebuilder_repo or DEFAULT_AREBUILDER_REPO).strip()
+        if not repo:
+            self.output("AREBUILDER_REPO is empty in config/arebuilder.env.")
+            return 1
+
+        requirement = repo if repo.startswith("git+") else f"git+{repo}"
+        self.output("Updating arebuilder...")
+        result = self.process_runner(
+            [
+                sys.executable,
+                "-m",
+                "pip",
+                "install",
+                "--quiet",
+                "--upgrade",
+                "--force-reinstall",
+                "--no-deps",
+                requirement,
+            ],
+            cwd=self.layout.root,
+            env=os.environ.copy(),
+            capture_output=False,
+            background=False,
+        )
+        if result.returncode != 0:
+            return self._report_process_failure(result)
+
+        package_after = _installed_arebuilder_version()
+        package_changed = package_before != package_after
+        container_status = self._update_containers()
+        return self._handle_native_update_restart(package_changed, container_status)
+
+    def _update_containers(self) -> int:
+        """Pull Docker images for the AREDev server stack."""
+
         if self._is_server_running():
             result = self._run_compose(["down"])
             if result.returncode != 0:
@@ -454,6 +502,38 @@ class AREDevController:
         self.output("Updating containers...")
         result = self._run_compose(["pull", "--ignore-pull-failures"])
         return self._report_process_failure(result)
+
+    def _handle_native_update_restart(
+        self,
+        package_changed: bool,
+        update_status: int,
+    ) -> int:
+        """Restart the interactive native prompt when pip installed new code."""
+
+        if update_status != 0:
+            return update_status
+
+        if not package_changed:
+            self.output("Update complete.")
+            return update_status
+
+        if not self._running_interactive:
+            self.output("Update complete. Please restart AREDev.")
+            return update_status
+
+        self.output("Update complete. Restarting...")
+        os.execv(
+            sys.executable,
+            [
+                sys.executable,
+                "-m",
+                "arebuilder",
+                "aredev",
+                "--root",
+                str(self.layout.root),
+            ],
+        )
+        return update_status
 
     def compile(self, args: list[str]) -> int:
         """Compile shared scripts, mirroring live output when the server runs."""
@@ -1487,6 +1567,15 @@ def _print_line(text: str) -> None:
     """Print one flushed line of user-visible output."""
 
     print(text, flush=True)
+
+
+def _installed_arebuilder_version() -> str | None:
+    """Return the installed arebuilder package version."""
+
+    try:
+        return importlib.metadata.version("arebuilder")
+    except importlib.metadata.PackageNotFoundError:
+        return None
 
 
 def _clear_terminal() -> None:

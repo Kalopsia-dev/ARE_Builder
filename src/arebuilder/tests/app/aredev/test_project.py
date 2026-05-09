@@ -3,6 +3,7 @@ from pathlib import Path
 from arebuilder.app.aredev.project import (
     BuilderConfig,
     BuilderConfigError,
+    DEFAULT_AREBUILDER_REPO,
     ProjectLayout,
     build_project_builder_settings,
     infer_project_paths,
@@ -23,6 +24,7 @@ def test_load_arebuilder_env_parses_defaults_and_overrides(tmp_path: Path) -> No
         # comments are ignored
         BUILD_TARGET=demo
         BUILDER_BACKEND=docker
+        AREBUILDER_REPO=https://example.invalid/ARE_Builder.git
         NWSERVER_IMAGE=custom/nwserver:dev
         NWN_INSTALL_PATH="{install_root}"
         """,
@@ -34,6 +36,7 @@ def test_load_arebuilder_env_parses_defaults_and_overrides(tmp_path: Path) -> No
     assert config.build_target == "demo"
     assert config.module_name == "are-dev-demo"
     assert config.builder_backend == "docker"
+    assert config.arebuilder_repo == "https://example.invalid/ARE_Builder.git"
     assert config.nwserver_image == "custom/nwserver:dev"
     assert config.nwn_install_root == install_root
 
@@ -52,6 +55,7 @@ def test_render_arebuilder_env_populates_inferred_nwn_install_path(monkeypatch) 
 
     arebuilder_env = render_arebuilder_env()
 
+    assert f"AREBUILDER_REPO={DEFAULT_AREBUILDER_REPO}\n" in arebuilder_env
     assert "NWN_INSTALL_PATH=/synthetic/nwn-install\n" in arebuilder_env
     assert "NWN_HOME_PATH=/synthetic/nwn-home\n" in arebuilder_env
 

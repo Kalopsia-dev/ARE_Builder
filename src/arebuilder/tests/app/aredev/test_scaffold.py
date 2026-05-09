@@ -168,6 +168,10 @@ def test_init_creates_expected_scaffold_without_resource_artifacts(
     assert "LD_PRELOAD=/usr/local/lib/libnwn-musl-compat.so" in dockerfile_text
     assert arebuilder_env["BUILD_TARGET"] == "pgcc"
     assert arebuilder_env["BUILDER_BACKEND"] == "native"
+    assert (
+        arebuilder_env["AREBUILDER_REPO"]
+        == "https://github.com/Kalopsia-dev/ARE_Builder.git"
+    )
     assert arebuilder_env["NWSERVER_IMAGE"] == "dmhoodoo/aredevnwnxserver:latest"
     env_template = resources.files("arebuilder").joinpath(
         "templates", "aredev", "config", "arebuilder.env"
@@ -254,9 +258,10 @@ def test_init_generates_windows_batch_wrapper_without_shell_wrapper(
     assert '-Mode update -ProjectRoot "%AREDEV_ROOT%"' in batch_wrapper
     assert "docker compose --progress quiet" in batch_wrapper
     assert "run --rm" in batch_wrapper
+    assert "python -m arebuilder aredev" in batch_wrapper
+    assert "py -m arebuilder aredev" in batch_wrapper
     assert "WHERE arebuilder" in batch_wrapper
     assert 'arebuilder aredev --root "%AREDEV_ROOT%"' in batch_wrapper
-    assert "py -m arebuilder aredev" in batch_wrapper
     assert "powershell.exe" in batch_wrapper
     assert "%%~B" in batch_wrapper
     assert "PAUSE" in batch_wrapper

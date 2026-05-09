@@ -71,7 +71,7 @@ Common AREDev commands are:
 | `toolset [run]` | Sync a toolset-compatible module bundle, optionally launching the toolset. |
 | `nwn [dm]` | Launch the NWN client and connect to the local server. |
 | `database [drop]` | Open the test database client, or reset database state with `drop`. |
-| `update` | Pull refreshed Docker images used by the scaffold. |
+| `update` | Update native `arebuilder` from `AREBUILDER_REPO` and pull refreshed Docker images. |
 
 ## Compile Command
 
