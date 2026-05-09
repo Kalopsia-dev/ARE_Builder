@@ -1,0 +1,101 @@
+services:
+  db:
+    # MariaDB stores local test-server state in named volumes so restarts are
+    # fast, while the schema/time seed files remain bind-mounted from the project.
+    container_name: aredevdbserver
+    hostname: db
+    image: mariadb:10
+    env_file: ${AREDEV_CONFIG_ROOT:-.}/config/db.env
+    volumes:
+      - database:/var/lib/mysql
+      - ${AREDEV_HOST_ROOT:-.}/are-resources/db_schema/schema_mysql.sql:/docker-entrypoint-initdb.d/schema_mysql.sql:ro
+      - ${AREDEV_HOST_ROOT:-.}/data/timeinit.sql:/docker-entrypoint-initdb.d/timeinit.sql:ro
+    restart: unless-stopped
+
+  nwserver:
+    # The NWN server consumes project/server runtime content plus HAK/TLK files
+    # mounted directly from the configured NWN home.
+    container_name: aredevnwserver
+    hostname: nwserver
+    image: ${NWSERVER_IMAGE:-dmhoodoo/aredevnwnxserver:latest}
+    env_file: ${AREDEV_CONFIG_ROOT:-.}/config/nwserver.env
+    depends_on:
+      - db
+    environment:
+      - NWN_MODULE
+    stdin_open: true
+    tty: true
+    volumes:
+      - type: bind
+        source: ${AREDEV_HOST_ROOT:-.}/logs
+        target: /nwn/run/logs.0
+      - type: bind
+        source: ${AREDEV_HOST_ROOT:-.}/server
+        target: /nwn/home
+      - type: bind
+        source: ${AREDEV_NWN_HOME_ROOT:-${NWN_HOME_PATH:-./server}}/hak
+        target: /nwn/home/hak
+        read_only: true
+      - type: bind
+        source: ${AREDEV_NWN_HOME_ROOT:-${NWN_HOME_PATH:-./server}}/tlk
+        target: /nwn/home/tlk
+        read_only: true
+      - type: bind
+        source: ${AREDEV_HOST_ROOT:-.}/are-resources/ruby
+        target: /nwn/ruby
+        read_only: true
+      - type: bind
+        source: ${AREDEV_HOST_ROOT:-.}
+        target: /var/builder
+        read_only: true
+    restart: unless-stopped
+    ports:
+      - "5121:5121/udp"
+
+  builder:
+    # The builder is isolated from the server network and works only through
+    # bind-mounted project and NWN install directories.
+    container_name: aredevbuilder
+    hostname: builder
+    image: ${BUILDER_IMAGE:-kalopsiadev/arebuilder:latest}
+    user: "1000:1000"
+    working_dir: /var/builder
+    env_file: ${AREDEV_CONFIG_ROOT:-.}/config/arebuilder.env
+    environment:
+      AREDEV_IN_CONTAINER: "1"
+      AREDEV_HOST_ROOT: ${AREDEV_HOST_ROOT:-.}
+      AREDEV_CONFIG_ROOT: /var/builder
+      AREDEV_NWN_INSTALL_ROOT: ${AREDEV_NWN_INSTALL_ROOT:-${NWN_INSTALL_PATH}}
+      AREDEV_NWN_HOME_ROOT: ${AREDEV_NWN_HOME_ROOT:-${NWN_HOME_PATH:-./server}}
+      AREDEV_NWN_HOME_MODULES_ROOT: /nwn/home/modules
+      AREDEV_HOST_LAUNCHER: ${AREDEV_HOST_LAUNCHER:-}
+      NWN_ROOT: /nwn/install
+      HAK_DIR: /nwn/home/hak
+      TLK_DIR: /nwn/home/tlk
+    volumes:
+      - type: bind
+        source: ${AREDEV_HOST_ROOT:-.}
+        target: /var/builder
+      - type: bind
+        source: ${AREDEV_NWN_INSTALL_ROOT:-${NWN_INSTALL_PATH}}
+        target: /nwn/install
+        read_only: true
+      - type: bind
+        source: ${AREDEV_NWN_HOME_ROOT:-${NWN_HOME_PATH:-./server}}/hak
+        target: /nwn/home/hak
+      - type: bind
+        source: ${AREDEV_NWN_HOME_ROOT:-${NWN_HOME_PATH:-./server}}/tlk
+        target: /nwn/home/tlk
+      - type: bind
+        source: ${AREDEV_NWN_HOME_ROOT:-${NWN_HOME_PATH:-./server}}/modules
+        target: /nwn/home/modules
+    restart: "no"
+    network_mode: "none"
+
+volumes:
+  # database is the active MariaDB data volume; data is retained for backward
+  # compatibility with older scaffolds that referenced it.
+  database:
+    driver: local
+  data:
+    driver: local

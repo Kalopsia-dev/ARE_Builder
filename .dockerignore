@@ -1,0 +1,42 @@
+.git
+.gitignore
+.DS_Store
+.vscode/
+.idea/
+
+# Python cache and virtual-environment outputs do not affect the packaged wheel.
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Test and lint artifacts are local developer state, not Docker build inputs.
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.tox/
+.nox/
+.coverage
+coverage.xml
+htmlcov/
+
+build/
+dist/
+*.egg-info/
+
+.env
+.venv/
+venv/
+env/
+
+# Generated AREDev project directories can be huge and are recreated or mounted
+# at runtime, so they are deliberately omitted from image build context.
+src/arebuilder/tests/
+scripts/
+
+are-resources/
+*-resources/
+compiled-resources/
+logs/
+server/
+temp/

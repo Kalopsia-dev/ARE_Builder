@@ -1,0 +1,54 @@
+[build-system]
+# Setuptools is enough here because package data is limited to static templates.
+requires = ["setuptools>=80", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "arebuilder"
+version = "0.1.0"
+description = "Build tool for Neverwinter Nights module artifacts."
+readme = "README.md"
+requires-python = ">=3.13"
+authors = [
+  { name = "Kalopsia" }
+]
+license = { text = "MIT" }
+dependencies = [
+  "nwn==0.0.22",
+  "prompt_toolkit>=3,<4",
+  "pydantic>=2,<3",
+  "pydantic-settings>=2,<3",
+  "tqdm==4.67.3",
+]
+
+[project.scripts]
+# The public CLI enters through one dispatcher that also exposes AREDev commands.
+arebuilder = "arebuilder.app.cli:main"
+aredev = "arebuilder.app.aredev:main"
+
+[tool.setuptools]
+# Source-layout packaging keeps importable code under src/ and avoids accidental
+# imports from the repository root during tests.
+package-dir = { "" = "src" }
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["arebuilder*"]
+exclude = ["arebuilder.tests", "arebuilder.tests.*"]
+
+[tool.setuptools.package-data]
+# AREDev scaffold/runtime files are read with importlib.resources, so they must
+# be present in wheels and Docker installs.
+arebuilder = [
+  "templates/aredev/*",
+  "templates/aredev/config/*",
+  "templates/aredev/data/*",
+  "templates/aredev/data/bin/*",
+]
+
+[tool.pytest.ini_options]
+# Tests live inside the package tree but are excluded from distributed packages.
+testpaths = ["src/arebuilder/tests"]
+norecursedirs = [".*", "__pycache__", "dist"]
+addopts = "-q"

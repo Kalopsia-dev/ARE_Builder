@@ -1,0 +1,6 @@
+# Tests and fixtures stay out of source distributions and Docker installs.
+prune src/arebuilder/tests
+
+# AREDev runtime templates must be packaged because scaffold commands read them
+# through importlib.resources at runtime.
+recursive-include src/arebuilder/templates *

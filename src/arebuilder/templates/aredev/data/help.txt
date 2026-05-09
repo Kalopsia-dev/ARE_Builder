@@ -1,0 +1,29 @@
+
+Usage:
+    compile [scriptname] : Compiles the named script or all scripts depending on a given include file.
+                           If no name is specified, a smart compile will be performed.
+                           Entering "compile all" will execute a full compile of all scripts.
+
+    build                : Generates the palettes, packs the module and links everything to the server.
+
+    toolset [run]        : Syncs the module and resources into a toolset compatible bundle.
+                           If run is specified the toolset is launched after syncing.
+
+    start                : Starts the AREDev Test Server (NWNX:EE Dedicated Server v8193.35)
+                           and loads the module selected as the build target.
+
+    stop                 : Stops the AREDev Test Server.
+
+    update               : Fetches the latest docker containers to bring the environment up to date.
+
+    nwn [dm]             : Launches a NWN:EE client (or DM client, if dm is specified).
+                           It automatically connects to the AREDev Test Server.
+
+    database [drop]      : Launches a MySQL client connected to the AREDev Test Server database.
+                           If "drop" is specified it will wipe the existing database data
+                           and initialize from the latest schema on next run.
+
+    help                 : Displays this usage information.
+
+    exit                 : Exits this utility.
+

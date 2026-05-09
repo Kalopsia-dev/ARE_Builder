@@ -1,0 +1,15 @@
+
+                  :oyhddddhyo/
+               /ymhs+/:  :/mNMNdydo
+             /hh/ .      omNdodMMMMy
+            sh:.        yN+:h+MN+ sMm/                                     /:
+           ss.         :Ns..hNMd...+NN:                                +oss:              yy
+          :h           :N+. dMMmhddhmMd.  hyyyhhdyo   :oyyyyo sho      +hy shdmmmmdy hmy..yN
+          /y.           dd.sMMN ....oMN:. sMsohNho+  sNm/:::  :NN      +MN  ::yMs:// mMMmhNM:.
+           h            +NyNMMy.    hmMs. +Mm//dNy+ :mMMhs/   :NM/.    /MN   .yMy.   mMo  NM+.
+           +o            oNMMM/.   ym:dN+ sMs.  /hNN+ yNNdmmo yMMhhhhy /Mh.   sMd.   hh../MN+.
+            yooy:        oNMMMs::+dd:. hNo.:   //.       :  .  :        o/.               : .
+             ::          +NMMydooo:.    +mdo:   yy
+                          :dN:o:          /shhhyho.
+
+AREDev - A NWN(X):EE toolchain utility designed to simplify development and testing for Arelith workflows.
