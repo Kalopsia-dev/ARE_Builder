@@ -258,9 +258,10 @@ def test_init_generates_windows_batch_wrapper_without_shell_wrapper(
     assert '-Mode update -ProjectRoot "%AREDEV_ROOT%"' in batch_wrapper
     assert "docker compose --progress quiet" in batch_wrapper
     assert "run --rm" in batch_wrapper
+    assert "python -m arebuilder aredev" in batch_wrapper
+    assert "py -m arebuilder aredev" in batch_wrapper
     assert "WHERE arebuilder" in batch_wrapper
     assert 'arebuilder aredev --root "%AREDEV_ROOT%"' in batch_wrapper
-    assert "py -m arebuilder aredev" in batch_wrapper
     assert "powershell.exe" in batch_wrapper
     assert "%%~B" in batch_wrapper
     assert "PAUSE" in batch_wrapper

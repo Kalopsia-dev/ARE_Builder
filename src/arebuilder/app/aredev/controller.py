@@ -476,6 +476,7 @@ class AREDevController:
                 "--quiet",
                 "--upgrade",
                 "--force-reinstall",
+                "--no-deps",
                 requirement,
             ],
             cwd=self.layout.root,
