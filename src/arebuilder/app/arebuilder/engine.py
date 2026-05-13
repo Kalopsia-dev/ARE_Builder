@@ -15,6 +15,7 @@ from arebuilder.builder.symlinks import (
     apply_symlink_plan,
     plan_symlinks_for_all,
     plan_symlinks_for_target,
+    prune_stale_symlinks_for_all,
     prune_stale_symlinks_for_target,
 )
 from arebuilder.config.module_settings import ModuleSettings
@@ -172,14 +173,20 @@ class BuildEngine:
         """Apply the full override symlink plan for shared and compiled resources."""
 
         print("Generating symlinks...", flush=True)
-        apply_symlink_plan(
-            plan_symlinks_for_all(
-                override_dir=self.runtime_paths.override_dir,
-                shared_root=self.runtime_paths.shared_root,
-                compiled_root=self.runtime_paths.compiled_root,
-                builder_mount_root=self.runtime_paths.builder_mount_root,
-            )
+        plans = plan_symlinks_for_all(
+            override_dir=self.runtime_paths.override_dir,
+            shared_root=self.runtime_paths.shared_root,
+            compiled_root=self.runtime_paths.compiled_root,
+            builder_mount_root=self.runtime_paths.builder_mount_root,
         )
+        prune_stale_symlinks_for_all(
+            override_dir=self.runtime_paths.override_dir,
+            shared_root=self.runtime_paths.shared_root,
+            compiled_root=self.runtime_paths.compiled_root,
+            builder_mount_root=self.runtime_paths.builder_mount_root,
+            active_plans=plans,
+        )
+        apply_symlink_plan(plans)
 
     def _apply_target_symlinks(self, module: BuildModule) -> None:
         """Apply override symlinks for one target module, replacing stale target links."""

@@ -59,6 +59,46 @@ def plan_symlinks_for_all(
     return plans
 
 
+def prune_stale_symlinks_for_all(
+    *,
+    override_dir: Path,
+    shared_root: Path,
+    compiled_root: Path,
+    builder_mount_root: str = "/var/builder",
+    active_plans: list[PlannedSymlink] | None = None,
+) -> int:
+    """Remove obsolete override links owned by the shared all-mode plan."""
+
+    shared_mount_roots = (
+        f"{builder_mount_root}/are-resources/gff",
+        f"{builder_mount_root}/are-resources/override",
+    )
+    compiled_mount_root = f"{builder_mount_root}/compiled-resources"
+    if active_plans is None:
+        active_plans = plan_symlinks_for_all(
+            override_dir=override_dir,
+            shared_root=shared_root,
+            compiled_root=compiled_root,
+            builder_mount_root=builder_mount_root,
+        )
+
+    active_links = {plan.link_path for plan in _deduplicate_symlink_plans(active_plans)}
+    removed = 0
+    if not override_dir.exists():
+        return removed
+
+    for link_path in sorted(override_dir.iterdir()):
+        if link_path in active_links or not link_path.is_symlink():
+            continue
+        target_path = os.readlink(link_path)
+        if _target_is_under_mount_roots(
+            target_path, shared_mount_roots
+        ) or _target_is_direct_child_of_mount_root(target_path, compiled_mount_root):
+            link_path.unlink()
+            removed += 1
+    return removed
+
+
 def plan_symlinks_for_target(
     *,
     target_name: str,
@@ -192,6 +232,17 @@ def _target_is_under_mount_roots(
         ):
             return True
     return False
+
+
+def _target_is_direct_child_of_mount_root(target_path: str, mount_root: str) -> bool:
+    """Return whether a symlink target is a direct child of a mounted root."""
+
+    normalized_target = target_path.rstrip("/")
+    normalized_root = mount_root.rstrip("/")
+    prefix = f"{normalized_root}/"
+    if not normalized_target.startswith(prefix):
+        return False
+    return "/" not in normalized_target[len(prefix) :]
 
 
 def count_symlink_plan_steps(plans: list[PlannedSymlink]) -> int:

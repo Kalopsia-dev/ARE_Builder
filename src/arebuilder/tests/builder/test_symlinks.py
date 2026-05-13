@@ -9,6 +9,7 @@ from arebuilder.builder.symlinks import (
     count_symlink_plan_steps,
     plan_symlinks_for_all,
     plan_symlinks_for_target,
+    prune_stale_symlinks_for_all,
     prune_stale_symlinks_for_target,
 )
 
@@ -333,6 +334,55 @@ def test_target_prune_removes_only_obsolete_owned_links(tmp_path: Path) -> None:
     assert not stale_compiled_link.is_symlink()
     assert shared_link.is_symlink()
     assert other_target_link.is_symlink()
+    assert manual_file.exists()
+
+
+def test_all_prune_removes_only_obsolete_shared_links(tmp_path: Path) -> None:
+    """Verify all-mode pruning removes stale shared links but preserves target links."""
+
+    override_dir = tmp_path / "override"
+    shared_root = tmp_path / "are-resources"
+    compiled_root = tmp_path / "compiled-resources"
+    current_gff = shared_root / "gff" / "area" / "current.are"
+    current_compiled = compiled_root / "current.ncs"
+    target_compiled = compiled_root / "are-dev-test" / "target.ncs"
+    for directory in (
+        override_dir,
+        current_gff.parent,
+        current_compiled.parent,
+        target_compiled.parent,
+    ):
+        directory.mkdir(parents=True, exist_ok=True)
+    current_gff.write_text("area", encoding="utf-8")
+    current_compiled.write_text("compiled", encoding="utf-8")
+    target_compiled.write_text("target", encoding="utf-8")
+
+    stale_gff_link = override_dir / "stale.are"
+    stale_gff_link.symlink_to("/var/builder/are-resources/gff/area/stale.are")
+    stale_compiled_link = override_dir / "stale.ncs"
+    stale_compiled_link.symlink_to("/var/builder/compiled-resources/stale.ncs")
+    target_link = override_dir / "target.ncs"
+    target_link.symlink_to("/var/builder/compiled-resources/are-dev-test/target.ncs")
+    manual_file = override_dir / "manual.utc"
+    manual_file.write_text("manual", encoding="utf-8")
+
+    plans = plan_symlinks_for_all(
+        override_dir=override_dir,
+        shared_root=shared_root,
+        compiled_root=compiled_root,
+    )
+
+    removed = prune_stale_symlinks_for_all(
+        override_dir=override_dir,
+        shared_root=shared_root,
+        compiled_root=compiled_root,
+        active_plans=plans,
+    )
+
+    assert removed == 2
+    assert not stale_gff_link.is_symlink()
+    assert not stale_compiled_link.is_symlink()
+    assert target_link.is_symlink()
     assert manual_file.exists()
 
 
