@@ -1,6 +1,10 @@
+import shutil
 from pathlib import Path
 
+import pytest
+
 from arebuilder.tests.app.aredev.helpers import (
+    FAKE_WINDOWS_HOST_ROOT,
     assert_toolset_resource,
     make_controller,
     stage_toolset_sources,
@@ -50,6 +54,72 @@ def test_toolset_creates_bundle_in_nwn_home_modules(tmp_path: Path) -> None:
     ]
     assert build_calls == []
     assert runner.calls == []
+
+
+def test_toolset_prunes_obsolete_resource_links(tmp_path: Path) -> None:
+    """Verify Toolset symlink bundles prune resource links absent from the new plan."""
+
+    nwn_home = tmp_path / "nwn-home"
+    controller, layout, _, _ = make_controller(tmp_path, nwn_home=nwn_home)
+    stage_toolset_sources(layout)
+    module_dir = nwn_home / "modules" / "are-dev-pgcc"
+    module_dir.mkdir(parents=True)
+    stale_link = module_dir / "removed.utc"
+    stale_link.symlink_to(
+        (layout.target_resources_dir("pgcc") / "removed.utc").resolve()
+    )
+    unrelated_link = module_dir / "manual.utc"
+    unrelated_link.symlink_to((tmp_path / "external" / "manual.utc").resolve())
+
+    assert controller.run("toolset", []) == 0
+
+    assert not stale_link.is_symlink()
+    assert unrelated_link.is_symlink()
+
+
+def test_toolset_prunes_obsolete_links_when_source_root_was_removed(
+    tmp_path: Path,
+) -> None:
+    """Verify stale Toolset links are pruned even when their source root is gone."""
+
+    nwn_home = tmp_path / "nwn-home"
+    controller, layout, _, _ = make_controller(tmp_path, nwn_home=nwn_home)
+    stage_toolset_sources(layout)
+    module_dir = nwn_home / "modules" / "are-dev-pgcc"
+    module_dir.mkdir(parents=True)
+    target_root = layout.target_resources_dir("pgcc")
+    stale_link = module_dir / "removed.utc"
+    stale_link.symlink_to((target_root / "removed.utc").resolve())
+    shutil.rmtree(target_root)
+
+    assert controller.run("toolset", []) == 0
+
+    assert not stale_link.is_symlink()
+
+
+def test_toolset_copy_mode_prunes_obsolete_manifest_entries(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify Windows Docker Toolset copies prune stale managed files."""
+
+    host_modules = tmp_path / "host-modules"
+    controller, layout, _, _ = make_controller(tmp_path)
+    stage_toolset_sources(layout)
+    old_resource = layout.target_resources_dir("pgcc") / "old.utc"
+    old_resource.write_text("old", encoding="utf-8")
+    monkeypatch.setenv("AREDEV_IN_CONTAINER", "1")
+    monkeypatch.setenv("AREDEV_HOST_ROOT", FAKE_WINDOWS_HOST_ROOT)
+    monkeypatch.setenv("AREDEV_NWN_HOME_MODULES_ROOT", str(host_modules))
+
+    assert controller.run("toolset", []) == 0
+    copied_old_resource = host_modules / "are-dev-pgcc" / "old.utc"
+    assert copied_old_resource.exists()
+
+    old_resource.unlink()
+
+    assert controller.run("toolset", []) == 0
+    assert not copied_old_resource.exists()
 
 
 def test_toolset_bad_argument_reports_usage(tmp_path: Path) -> None:

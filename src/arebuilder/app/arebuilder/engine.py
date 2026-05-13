@@ -11,6 +11,7 @@ from arebuilder.builder.symlinks import (
     apply_symlink_plan,
     plan_symlinks_for_all,
     plan_symlinks_for_target,
+    prune_stale_symlinks_for_target,
 )
 from arebuilder.config.module_settings import ModuleSettings
 from arebuilder.config.runtime import BuildConfig, BuildModule, RuntimePaths
@@ -175,16 +176,24 @@ class BuildEngine:
         """Apply override symlinks for one target module, replacing stale target links."""
 
         print("Generating symlinks...", flush=True)
-        apply_symlink_plan(
-            plan_symlinks_for_target(
-                target_name=module.name,
-                override_dir=self.runtime_paths.override_dir,
-                builder_root=self.runtime_paths.builder_root,
-                source_root=self.runtime_paths.module_source_root(module),
-                compiled_root=self.runtime_paths.compiled_root,
-                builder_mount_root=self.runtime_paths.builder_mount_root,
-            )
+        plans = plan_symlinks_for_target(
+            target_name=module.name,
+            override_dir=self.runtime_paths.override_dir,
+            builder_root=self.runtime_paths.builder_root,
+            source_root=self.runtime_paths.module_source_root(module),
+            compiled_root=self.runtime_paths.compiled_root,
+            builder_mount_root=self.runtime_paths.builder_mount_root,
         )
+        prune_stale_symlinks_for_target(
+            target_name=module.name,
+            override_dir=self.runtime_paths.override_dir,
+            builder_root=self.runtime_paths.builder_root,
+            source_root=self.runtime_paths.module_source_root(module),
+            compiled_root=self.runtime_paths.compiled_root,
+            builder_mount_root=self.runtime_paths.builder_mount_root,
+            active_plans=plans,
+        )
+        apply_symlink_plan(plans)
 
     def _compile_shared_scripts(self, selector: str | None) -> None:
         """Compile shared ARE scripts through the stateful direct command."""

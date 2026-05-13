@@ -10,6 +10,7 @@ from arebuilder.builder.symlinks import (
     apply_symlink_plan,
     plan_symlinks_for_all,
     plan_symlinks_for_target,
+    prune_stale_symlinks_for_target,
 )
 
 __all__ = [
@@ -21,5 +22,6 @@ __all__ = [
     "iter_archive_members",
     "plan_symlinks_for_all",
     "plan_symlinks_for_target",
+    "prune_stale_symlinks_for_target",
     "read_erf_members",
 ]

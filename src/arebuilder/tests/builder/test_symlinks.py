@@ -9,6 +9,7 @@ from arebuilder.builder.symlinks import (
     count_symlink_plan_steps,
     plan_symlinks_for_all,
     plan_symlinks_for_target,
+    prune_stale_symlinks_for_target,
 )
 
 
@@ -280,6 +281,59 @@ def test_link_mode_duplicate_basenames_keep_last_link(tmp_path: Path) -> None:
         override_dir / "duplicate.utc",
         target_path=expected_target,
     )
+
+
+def test_target_prune_removes_only_obsolete_owned_links(tmp_path: Path) -> None:
+    """Verify target pruning removes stale links without touching unrelated resources."""
+
+    override_dir = tmp_path / "override"
+    builder_root = tmp_path / "builder-root"
+    compiled_root = tmp_path / "compiled-resources"
+    current_source = builder_root / "test-resources" / "creature" / "current.utc"
+    current_compiled = compiled_root / "are-dev-test" / "current.ncs"
+    for directory in (
+        override_dir,
+        current_source.parent,
+        current_compiled.parent,
+    ):
+        directory.mkdir(parents=True, exist_ok=True)
+    current_source.write_text("current", encoding="utf-8")
+    current_compiled.write_text("compiled", encoding="utf-8")
+
+    stale_source_link = override_dir / "stale.utc"
+    stale_source_link.symlink_to("/var/builder/test-resources/creature/stale.utc")
+    stale_compiled_link = override_dir / "stale.ncs"
+    stale_compiled_link.symlink_to(
+        "/var/builder/compiled-resources/are-dev-test/stale.ncs"
+    )
+    shared_link = override_dir / "shared.utc"
+    shared_link.symlink_to("/var/builder/are-resources/gff/creature/shared.utc")
+    other_target_link = override_dir / "other.utc"
+    other_target_link.symlink_to("/var/builder/other-resources/creature/other.utc")
+    manual_file = override_dir / "manual.utc"
+    manual_file.write_text("manual", encoding="utf-8")
+
+    plans = plan_symlinks_for_target(
+        target_name="are-dev-test",
+        override_dir=override_dir,
+        builder_root=builder_root,
+        compiled_root=compiled_root,
+    )
+
+    removed = prune_stale_symlinks_for_target(
+        target_name="are-dev-test",
+        override_dir=override_dir,
+        builder_root=builder_root,
+        compiled_root=compiled_root,
+        active_plans=plans,
+    )
+
+    assert removed == 2
+    assert not stale_source_link.is_symlink()
+    assert not stale_compiled_link.is_symlink()
+    assert shared_link.is_symlink()
+    assert other_target_link.is_symlink()
+    assert manual_file.exists()
 
 
 @pytest.mark.skipif(

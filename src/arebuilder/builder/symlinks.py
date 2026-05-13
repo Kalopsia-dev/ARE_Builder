@@ -102,6 +102,56 @@ def plan_symlinks_for_target(
     return plans
 
 
+def prune_stale_symlinks_for_target(
+    *,
+    target_name: str,
+    override_dir: Path,
+    builder_root: Path,
+    compiled_root: Path,
+    source_root: Path | None = None,
+    builder_mount_root: str = "/var/builder",
+    active_plans: list[PlannedSymlink] | None = None,
+) -> int:
+    """Remove obsolete override links owned by the target link plan."""
+
+    target_source_root = source_root or _default_target_source_root(
+        builder_root, target_name
+    )
+    source_mount_root = _mounted_source_root(
+        builder_root=builder_root,
+        source_root=target_source_root,
+        builder_mount_root=builder_mount_root,
+        fallback_name=target_name,
+    )
+    target_mount_roots = (
+        source_mount_root,
+        f"{builder_mount_root}/compiled-resources/{target_name}",
+    )
+    if active_plans is None:
+        active_plans = plan_symlinks_for_target(
+            target_name=target_name,
+            override_dir=override_dir,
+            builder_root=builder_root,
+            compiled_root=compiled_root,
+            source_root=source_root,
+            builder_mount_root=builder_mount_root,
+        )
+
+    active_links = {plan.link_path for plan in _deduplicate_symlink_plans(active_plans)}
+    removed = 0
+    if not override_dir.exists():
+        return removed
+
+    for link_path in sorted(override_dir.iterdir()):
+        if link_path in active_links or not link_path.is_symlink():
+            continue
+        target_path = os.readlink(link_path)
+        if _target_is_under_mount_roots(target_path, target_mount_roots):
+            link_path.unlink()
+            removed += 1
+    return removed
+
+
 def _default_target_source_root(builder_root: Path, target_name: str) -> Path:
     """Return the conventional resource root for a target name."""
 
@@ -126,6 +176,22 @@ def _mounted_source_root(
         # the fallback keeps the target path predictable for generated projects.
         return f"{builder_mount_root}/{fallback_name}"
     return f"{builder_mount_root}/{relative_source_root.as_posix()}"
+
+
+def _target_is_under_mount_roots(
+    target_path: str,
+    mount_roots: tuple[str, ...],
+) -> bool:
+    """Return whether a symlink target belongs to one of the mounted roots."""
+
+    normalized_target = target_path.rstrip("/")
+    for mount_root in mount_roots:
+        normalized_root = mount_root.rstrip("/")
+        if normalized_target == normalized_root or normalized_target.startswith(
+            f"{normalized_root}/"
+        ):
+            return True
+    return False
 
 
 def count_symlink_plan_steps(plans: list[PlannedSymlink]) -> int:
