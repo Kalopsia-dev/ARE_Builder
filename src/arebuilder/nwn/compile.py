@@ -66,6 +66,7 @@ class Script:
             self.includes: set[Script] = set()
             self.contents = None
             self.declares_main = False
+            self.is_entrypoint_alias = False
             self.has_main = False
             script_index.add(self)
             return
@@ -83,11 +84,16 @@ class Script:
         # Entry-point detection is performed after comment removal because many
         # shared include files mention main() in documentation or dead snippets.
         self.declares_main = bool(re.search(script_index.regex_main_fns, text))
-        self.has_main = self.declares_main
         self.include_names = {
             ScriptIndex.normalise_script_name(include_name)
             for include_name in re.findall(script_index.regex_includes, text)
         }
+        self.is_entrypoint_alias = (
+            not self.declares_main
+            and bool(self.include_names)
+            and not re.sub(script_index.regex_includes, "", text).strip()
+        )
+        self.has_main = self.declares_main
         self.includes: set[Script] = set()
 
     def __hash__(self) -> int:
@@ -205,9 +211,11 @@ class ScriptIndex:
         return {script for script in self if script.primary and script.contents}
 
     def compilable_primary_scripts(self) -> set[Script]:
-        """Return primary scripts that declare an executable NWScript entry point."""
+        """Return primary scripts that can produce executable NWScript output."""
 
-        return {script for script in self.primary_scripts() if script.declares_main}
+        return {
+            script for script in self.primary_scripts() if self.is_compilable(script)
+        }
 
     def get_modified(self, state_path: Path) -> set[Script]:
         """Return primary scripts whose content hash differs from the saved state."""
@@ -229,8 +237,13 @@ class ScriptIndex:
         return {
             script
             for script in related
-            if script.primary and script.contents and script.declares_main
+            if script.primary and script.contents and self.is_compilable(script)
         }
+
+    def is_compilable(self, script: Script) -> bool:
+        """Return whether a primary script should produce a compiled NCS."""
+
+        return script.declares_main or (script.is_entrypoint_alias and script.has_main)
 
     def _index_script_paths(self) -> tuple[dict[str, Path], list[Path]]:
         """Return normalized script paths using primary and include directory precedence."""
@@ -507,7 +520,7 @@ class StatefulScriptCompiler:
         if not script.contents:
             raise CompileError(f"Error: {script_name}.nss is a base game script.")
 
-        if script.is_include or not script.declares_main:
+        if script.is_include or not script_index.is_compilable(script):
             print("Include file detected. Checking dependencies...", end="\n\n")
             to_compile = script_index.get_related({script})
             if not to_compile:
@@ -547,7 +560,8 @@ class StatefulScriptCompiler:
         if self.state_path is None:
             raise CompileError("A state path is required for modified compilation.")
 
-        modified = script_index.get_modified(self.state_path)
+        modified = script_index.get_modified(state_path=self.state_path)
+        modified.update(self._missing_output_scripts())
         to_compile = script_index.get_related(modified)
         if not modified or not to_compile:
             print("All scripts are up to date.")
@@ -698,6 +712,19 @@ class StatefulScriptCompiler:
         for directory in self.output_dirs:
             for file_path in directory.glob("*.ncs"):
                 file_path.unlink()
+
+    def _missing_output_scripts(self) -> set[Script]:
+        """Return current scripts missing from at least one configured output directory."""
+
+        script_index = self._require_index()
+        return {
+            script
+            for script in script_index.compilable_primary_scripts()
+            if any(
+                not (output_dir / f"{script.name}.ncs").is_file()
+                for output_dir in self.output_dirs
+            )
+        }
 
     def _has_state(self) -> bool:
         """Return whether compiled output and hash state already exist."""

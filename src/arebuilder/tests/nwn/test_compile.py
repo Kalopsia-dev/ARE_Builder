@@ -346,7 +346,7 @@ def test_compile_remaps_containerized_host_absolute_script_symlink_targets(
 def test_compile_all_does_not_compile_include_that_inherits_main(
     tmp_path: Path,
 ) -> None:
-    """Verify that compile all does not compile include that inherits main."""
+    """Verify compile all skips non-alias includes that inherit main."""
 
     script_dir = tmp_path / "scripts"
     output_dir = tmp_path / "compiled"
@@ -369,6 +369,67 @@ def test_compile_all_does_not_compile_include_that_inherits_main(
 
     assert result.compiled_count == 1
     assert {path.name for path in output_dir.glob("*.ncs")} == {"entry_script.ncs"}
+
+
+def test_compile_all_compiles_include_only_entrypoint_alias(tmp_path: Path) -> None:
+    """Verify include-only aliases compile when the included script has main."""
+
+    script_dir = tmp_path / "scripts"
+    output_dir = tmp_path / "compiled"
+    state_path = tmp_path / "temp" / "script_index.json"
+    script_dir.mkdir()
+    output_dir.mkdir()
+    _write_script(script_dir / "shared_spawn.nss", "void main() {}")
+    _write_script(script_dir / "nw_c2_default9.nss", '#include "shared_spawn"')
+
+    result = compile_scripts(
+        script_dir=script_dir,
+        output_dir=output_dir,
+        selector="all",
+        state_path=state_path,
+        compiler_factory=fake_compiler_factory,
+    )
+
+    assert result.compiled_count == 2
+    assert {path.name for path in output_dir.glob("*.ncs")} == {
+        "nw_c2_default9.ncs",
+        "shared_spawn.ncs",
+    }
+
+
+def test_modified_compile_rebuilds_missing_entrypoint_alias_output(
+    tmp_path: Path,
+) -> None:
+    """Verify stateful compiles repair missing alias outputs even when sources match."""
+
+    script_dir = tmp_path / "scripts"
+    output_dir = tmp_path / "compiled"
+    state_path = tmp_path / "temp" / "script_index.json"
+    script_dir.mkdir()
+    output_dir.mkdir()
+    _write_script(script_dir / "shared_spawn.nss", "void main() {}")
+    _write_script(script_dir / "nw_c2_default9.nss", '#include "shared_spawn"')
+
+    compile_scripts(
+        script_dir=script_dir,
+        output_dir=output_dir,
+        selector="all",
+        state_path=state_path,
+        compiler_factory=fake_compiler_factory,
+    )
+    (output_dir / "nw_c2_default9.ncs").unlink()
+
+    result = compile_scripts(
+        script_dir=script_dir,
+        output_dir=output_dir,
+        state_path=state_path,
+        compiler_factory=fake_compiler_factory,
+    )
+
+    assert result.compiled_count == 1
+    assert (output_dir / "nw_c2_default9.ncs").read_bytes() == (
+        b"compiled:nw_c2_default9"
+    )
 
 
 def test_unterminated_block_comment_does_not_create_entry_point(
