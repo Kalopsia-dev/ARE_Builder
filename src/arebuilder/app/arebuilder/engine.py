@@ -6,6 +6,10 @@ from pathlib import Path
 from typing import Callable, Iterable
 
 from arebuilder.builder.archive import build_archive
+from arebuilder.builder.module_dependencies import (
+    AreaDependencyReport,
+    filter_area_tileset_dependencies,
+)
 from arebuilder.builder.module_file import build_module_ifo
 from arebuilder.builder.symlinks import (
     apply_symlink_plan,
@@ -155,6 +159,11 @@ class BuildEngine:
     ) -> None:
         """Write the generated module metadata file and pack the final module archive."""
 
+        dependency_report = workspace.filter_area_dependencies(
+            hak_dir=self.runtime_paths.hak_dir,
+            nwn_root=self.runtime_paths.nwn_root,
+        )
+        _print_area_dependency_warnings(workspace.settings, dependency_report)
         workspace.write_module_file()
         print(f"Packing module: {module.name}", flush=True)
         workspace.pack_archive()
@@ -345,6 +354,23 @@ class ModuleBuildWorkspace:
         module_ifo = build_module_ifo(self.settings, self.included_files)
         write_gff(self.build_dir / "module.ifo", module_ifo, "IFO ")
 
+    def filter_area_dependencies(
+        self,
+        *,
+        hak_dir: Path,
+        nwn_root: Path | None,
+    ) -> AreaDependencyReport:
+        """Remove areas that cannot load with the configured HAK list."""
+
+        report = filter_area_tileset_dependencies(
+            self.settings,
+            self.included_files,
+            hak_dir=hak_dir,
+            nwn_root=nwn_root,
+        )
+        self.included_files = report.included_files
+        return report
+
     def pack_archive(self) -> None:
         """Pack the module build directory into the configured final archive path."""
 
@@ -387,3 +413,42 @@ def _find_settings_file(source_dirs: list[Path]) -> Path | None:
         ),
         None,
     )
+
+
+def _print_area_dependency_warnings(
+    settings: ModuleSettings,
+    report: AreaDependencyReport,
+) -> None:
+    """Print warnings for dependency checks that changed the module area list."""
+
+    for issue in [
+        *report.availability.missing_haks,
+        *report.availability.unreadable_haks,
+    ]:
+        print(
+            "W: Enabled HAK "
+            f"{issue.hak_name!r} could not be inspected at "
+            f"{issue.path}: {issue.reason}.",
+            flush=True,
+        )
+
+    for omission in report.omitted_areas:
+        print(
+            f"W: {omission.area_name}: Tileset {omission.tileset}.set "
+            "is unavailable; omitting area.",
+            flush=True,
+        )
+
+    entry_area = settings.entry_area.lower()
+    omitted_entry = [
+        omission
+        for omission in report.omitted_areas
+        if omission.area_name.lower() == entry_area
+    ]
+    if omitted_entry:
+        omission = omitted_entry[0]
+        raise ValueError(
+            "Entry area "
+            f"{settings.entry_area!r} uses unavailable tileset "
+            f"{omission.tileset}.set and cannot be omitted."
+        )
