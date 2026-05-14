@@ -30,6 +30,7 @@ class TilesetAvailability:
     """Tileset resources visible through the base game and enabled HAKs."""
 
     resources: frozenset[str]
+    base_tilesets_known: bool = True
     missing_haks: tuple[HakInspectionIssue, ...] = ()
     unreadable_haks: tuple[HakInspectionIssue, ...] = ()
 
@@ -61,6 +62,11 @@ def filter_area_tileset_dependencies(
     )
     filtered_files = dict(included_files)
     omitted_areas: list[AreaTilesetOmission] = []
+    if not availability.base_tilesets_known:
+        return AreaDependencyReport(
+            included_files=filtered_files,
+            availability=availability,
+        )
 
     for basename, path in sorted(included_files.items()):
         if Path(basename).suffix.lower() != ".are":
@@ -95,7 +101,8 @@ def discover_available_tilesets(
 ) -> TilesetAvailability:
     """Return lower-case ``.set`` resources available to a module."""
 
-    resources = _tileset_resources_from_nwn_install(nwn_root)
+    base_resources = _tileset_resources_from_nwn_install(nwn_root)
+    resources = set(base_resources or ())
 
     missing_haks: list[HakInspectionIssue] = []
     unreadable_haks: list[HakInspectionIssue] = []
@@ -125,6 +132,7 @@ def discover_available_tilesets(
 
     return TilesetAvailability(
         resources=frozenset(resources),
+        base_tilesets_known=base_resources is not None,
         missing_haks=tuple(missing_haks),
         unreadable_haks=tuple(unreadable_haks),
     )
@@ -141,17 +149,24 @@ def area_tileset(path: Path) -> str | None:
     return normalized or None
 
 
-def _tileset_resources_from_nwn_install(nwn_root: Path | None) -> set[str]:
+def _tileset_resources_from_nwn_install(nwn_root: Path | None) -> set[str] | None:
     """Index base-game tilesets from known NWN key-file layouts."""
 
     if nwn_root is None:
-        return set()
+        return None
 
+    key_paths = _candidate_key_files(nwn_root)
+    if not key_paths:
+        return None
     resources: set[str] = set()
-    for key_path in _candidate_key_files(nwn_root):
+    read_any = False
+    for key_path in key_paths:
         filenames = _read_key_filenames(key_path, nwn_root)
+        if filenames is None:
+            continue
+        read_any = True
         resources.update(_tileset_resources_from_filenames(filenames))
-    return resources
+    return resources if read_any else None
 
 
 def _candidate_key_files(nwn_root: Path) -> list[Path]:
@@ -172,7 +187,7 @@ def _candidate_key_files(nwn_root: Path) -> list[Path]:
     return unique_candidates
 
 
-def _read_key_filenames(key_path: Path, nwn_root: Path) -> list[str]:
+def _read_key_filenames(key_path: Path, nwn_root: Path) -> list[str] | None:
     """Read one key file, trying common BIF path bases."""
 
     bif_roots = [nwn_root, key_path.parent, nwn_root / "data"]
@@ -189,7 +204,7 @@ def _read_key_filenames(key_path: Path, nwn_root: Path) -> list[str]:
             return sorted(reader.filenames)
         finally:
             reader.close()
-    return []
+    return None
 
 
 def _tileset_resources_from_filenames(filenames: list[str]) -> set[str]:

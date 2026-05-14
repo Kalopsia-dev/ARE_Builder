@@ -54,6 +54,29 @@ def test_filter_area_tileset_dependencies_omits_missing_tileset(
     assert report.omitted_areas[0].tileset == "missing01"
 
 
+def test_filter_area_tileset_dependencies_keeps_areas_when_base_install_unknown(
+    tmp_path: Path,
+) -> None:
+    """Verify areas are preserved when base tilesets cannot be inspected."""
+
+    hak_dir = tmp_path / "hak"
+    area_dir = tmp_path / "areas"
+    hak_dir.mkdir()
+    area_dir.mkdir()
+    _write_area(area_dir / "base_area.are", "ttr01")
+
+    report = filter_area_tileset_dependencies(
+        _settings(""),
+        {"base_area.are": area_dir / "base_area.are"},
+        hak_dir=hak_dir,
+        nwn_root=tmp_path / "missing-install",
+    )
+
+    assert sorted(report.included_files) == ["base_area.are"]
+    assert report.omitted_areas == ()
+    assert not report.availability.base_tilesets_known
+
+
 def test_discover_available_tilesets_reports_missing_haks(
     tmp_path: Path,
     monkeypatch,
