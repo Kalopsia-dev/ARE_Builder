@@ -25,7 +25,28 @@ def test_build_runs_native_builder(tmp_path: Path) -> None:
     assert controller.run("build", []) == 0
 
     assert build_calls == [("all", ["are-dev-pgcc"], False)]
-    assert runner.calls == []
+    assert runner.calls == [["docker", "ps", "--format", "{{.Names}}"]]
+
+
+def test_build_refuses_while_server_is_running(tmp_path: Path) -> None:
+    """Verify the build command does not run while NWServer is active."""
+
+    output: list[str] = []
+    runner = FakeRunner(running="aredevnwserver\n")
+    controller, layout, build_calls, runner = make_controller(
+        tmp_path,
+        runner=runner,
+        output=output.append,
+        nwn_home=tmp_path / "nwn-home",
+    )
+
+    assert controller.run("build", []) == 1
+
+    assert output == ["Server is running."]
+    assert build_calls == []
+    assert runner.calls == [["docker", "ps", "--format", "{{.Names}}"]]
+    assert not layout.hak_dir.is_symlink()
+    assert not layout.tlk_dir.is_symlink()
 
 
 @pytest.mark.parametrize(

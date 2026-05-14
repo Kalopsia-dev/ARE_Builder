@@ -555,6 +555,9 @@ class AREDevController:
     def build(self) -> int:
         """Validate runtime paths, run the configured builder, and surface build failures."""
 
+        if self._is_server_running():
+            self.output("Server is running.")
+            return 1
         if not self._validate_target_resources():
             return 1
         if not self._prepare_runtime_environment():
