@@ -489,6 +489,8 @@ class AREDevController:
 
         package_after = _installed_arebuilder_version()
         package_changed = package_before != package_after
+        if package_changed and package_after is not None:
+            self.output(f"Updated arebuilder to version {package_after}.")
         container_status = self._update_containers()
         return self._handle_native_update_restart(package_changed, container_status)
 
