@@ -20,7 +20,7 @@ def test_filter_area_tileset_dependencies_omits_missing_tileset(
     monkeypatch.setattr(
         module_dependencies,
         "_tileset_resources_from_nwn_install",
-        lambda _nwn_root: {"ttr01.set"},
+        lambda _nwn_root: _tileset_index({"ttr01.set"}),
     )
     hak_dir = tmp_path / "hak"
     area_dir = tmp_path / "areas"
@@ -52,6 +52,41 @@ def test_filter_area_tileset_dependencies_omits_missing_tileset(
     ]
     assert [omission.area_name for omission in report.omitted_areas] == ["missing_area"]
     assert report.omitted_areas[0].tileset == "missing01"
+
+
+def test_filter_area_tileset_dependencies_omits_unavailable_tile_id(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """Verify areas are removed when their tileset exists but a tile id does not."""
+
+    monkeypatch.setattr(
+        module_dependencies,
+        "_tileset_resources_from_nwn_install",
+        lambda _nwn_root: _tileset_index({"ttr01.set"}, {"ttr01.set": 2}),
+    )
+    hak_dir = tmp_path / "hak"
+    area_dir = tmp_path / "areas"
+    hak_dir.mkdir()
+    area_dir.mkdir()
+    _write_area(area_dir / "valid_area.are", "ttr01", tile_ids=[0, 1])
+    _write_area(area_dir / "bad_area.are", "ttr01", tile_ids=[2])
+
+    report = filter_area_tileset_dependencies(
+        _settings(""),
+        {
+            "valid_area.are": area_dir / "valid_area.are",
+            "bad_area.are": area_dir / "bad_area.are",
+        },
+        hak_dir=hak_dir,
+        nwn_root=tmp_path / "nwn",
+    )
+
+    assert sorted(report.included_files) == ["valid_area.are"]
+    assert [omission.area_name for omission in report.omitted_areas] == ["bad_area"]
+    assert report.omitted_areas[0].reason == "tile_index"
+    assert report.omitted_areas[0].required_tile_id == 2
+    assert report.omitted_areas[0].available_tile_count == 2
 
 
 def test_filter_area_tileset_dependencies_keeps_areas_when_base_install_unknown(
@@ -86,7 +121,7 @@ def test_discover_available_tilesets_reports_missing_haks(
     monkeypatch.setattr(
         module_dependencies,
         "_tileset_resources_from_nwn_install",
-        lambda _nwn_root: {"ttr01.set"},
+        lambda _nwn_root: _tileset_index({"ttr01.set"}),
     )
     hak_dir = tmp_path / "hak"
     hak_dir.mkdir()
@@ -119,10 +154,15 @@ def _settings(haks: str):
     )
 
 
-def _write_area(path: Path, tileset: str) -> None:
+def _write_area(path: Path, tileset: str, tile_ids: list[int] | None = None) -> None:
+    fields = {"Tileset": gff.ResRef(tileset)}
+    if tile_ids is not None:
+        fields["Tile_List"] = gff.List(
+            [gff.Struct(0, Tile_ID=gff.Int(tile_id)) for tile_id in tile_ids]
+        )
     write_gff(
         path,
-        gff.Struct(0xFFFFFFFF, Tileset=gff.ResRef(tileset)),
+        gff.Struct(0xFFFFFFFF, **fields),
         "ARE ",
     )
 
@@ -132,4 +172,14 @@ def _write_hak(path: Path, filenames: list[str]) -> None:
         path,
         b"HAK ",
         [(filename, b"placeholder") for filename in filenames],
+    )
+
+
+def _tileset_index(
+    resources: set[str],
+    tile_counts: dict[str, int] | None = None,
+):
+    return module_dependencies._TilesetResourceIndex(
+        resources=set(resources),
+        tile_counts=dict(tile_counts or {}),
     )

@@ -440,6 +440,14 @@ def _print_area_dependency_warnings(
         )
 
     for omission in report.omitted_areas:
+        if omission.reason == "tile_index":
+            print(
+                f"W: {omission.area_name}: Tile with ID "
+                f"{omission.required_tile_id} is unavailable; omitting area. "
+                f"Please update the HAK that provides {omission.tileset}.set.",
+                flush=True,
+            )
+            continue
         print(
             f"W: {omission.area_name}: Tileset {omission.tileset}.set "
             "is unavailable; omitting area.",
@@ -454,6 +462,13 @@ def _print_area_dependency_warnings(
     ]
     if omitted_entry:
         omission = omitted_entry[0]
+        if omission.reason == "tile_index":
+            raise ValueError(
+                "Entry area "
+                f"{settings.entry_area!r} uses unavailable tile ID "
+                f"{omission.required_tile_id} from tileset "
+                f"{omission.tileset}.set and cannot be omitted."
+            )
         raise ValueError(
             "Entry area "
             f"{settings.entry_area!r} uses unavailable tileset "

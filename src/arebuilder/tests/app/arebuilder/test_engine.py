@@ -67,3 +67,44 @@ def test_area_dependency_warning_prints_one_line_per_omitted_area(
     assert capsys.readouterr().out == (
         "W: ship_area: Tileset aef19.set is unavailable; omitting area.\n"
     )
+
+
+def test_area_dependency_warning_prints_unavailable_tile_id(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    """Verify outdated tileset warnings identify the unavailable tile id."""
+
+    settings = parse_settings_text(
+        """
+        name Test Module
+        tag TEST_MODULE
+        entry_area start
+        entry_x 0.0
+        entry_y 0.0
+        entry_z 0.0
+        entry_facing 0.0
+        """,
+        Path("settings.txt"),
+    )
+    report = AreaDependencyReport(
+        included_files={},
+        omitted_areas=(
+            AreaTilesetOmission(
+                area_name="ship_area",
+                area_path=tmp_path / "ship_area.are",
+                tileset="tcn01",
+                reason="tile_index",
+                required_tile_id=408,
+                available_tile_count=408,
+            ),
+        ),
+        availability=TilesetAvailability(resources=frozenset()),
+    )
+
+    _print_area_dependency_warnings(settings, report)
+
+    assert capsys.readouterr().out == (
+        "W: ship_area: Tile with ID 408 is unavailable; omitting area. "
+        "Please update the HAK that provides tcn01.set.\n"
+    )

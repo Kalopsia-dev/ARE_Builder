@@ -25,6 +25,10 @@ from prompt_toolkit.key_binding.bindings import completion as completion_binding
 from prompt_toolkit.shortcuts.prompt import CompleteStyle
 
 from arebuilder.app.arebuilder.build_command import execute_build_command
+from arebuilder.app.arebuilder.engine import (
+    ModuleBuildWorkspace,
+    _print_area_dependency_warnings,
+)
 from arebuilder.app.aredev.host_bridge import (
     HOST_COMMAND_DIR,
     HOST_DOCKER_TIMEOUT_SECONDS,
@@ -52,6 +56,7 @@ from arebuilder.builder.symlinks import (
     count_symlink_plan_steps,
 )
 from arebuilder.config.nwn_paths import find_nwn_client_executable
+from arebuilder.config.runtime import BuildModule
 
 COMPOSE_ARGS = ["docker", "compose", "--progress", "quiet"]
 AREDEV_PROJECT = "aredev"
@@ -1046,6 +1051,7 @@ class AREDevController:
 
         self.output("Planning symlinks...")
         resource_plans = self._toolset_symlink_plans(toolset_module_dir)
+        resource_plans = self._filter_toolset_area_dependency_plans(resource_plans)
         copy_mode = _in_builder_container() and host_path_looks_windows(
             os.environ.get("AREDEV_HOST_ROOT", "")
         )
@@ -1157,6 +1163,42 @@ class AREDevController:
             )
         )
         return plans
+
+    def _filter_toolset_area_dependency_plans(
+        self,
+        resource_plans: list[PlannedSymlink],
+    ) -> list[PlannedSymlink]:
+        """Remove Toolset area resources that cannot load with enabled HAKs."""
+
+        module = BuildModule(
+            name=self.config.module_name,
+            source_dirs=[
+                self.layout.are_resources_dir / "gff",
+                self.layout.target_resources_dir(self.config.build_target),
+            ],
+            build_dir=self.layout.build_dir(self.config.module_name),
+            target_path=self.layout.module_archive_path(self.config.module_name),
+        )
+        workspace = ModuleBuildWorkspace.from_spec(module)
+        report = workspace.filter_area_dependencies(
+            hak_dir=self.layout.hak_dir,
+            nwn_root=self.config.nwn_install_root,
+        )
+        _print_area_dependency_warnings(workspace.settings, report)
+        omitted_areas = {
+            omission.area_name.lower() for omission in report.omitted_areas
+        }
+        if not omitted_areas:
+            return resource_plans
+        area_suffixes = {".are", ".git", ".gic"}
+        return [
+            plan
+            for plan in resource_plans
+            if not (
+                plan.link_path.suffix.lower() in area_suffixes
+                and plan.link_path.stem.lower() in omitted_areas
+            )
+        ]
 
     def _prune_stale_toolset_symlinks(
         self,
