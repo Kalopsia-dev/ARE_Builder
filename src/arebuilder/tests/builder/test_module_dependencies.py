@@ -89,6 +89,78 @@ def test_filter_area_tileset_dependencies_omits_unavailable_tile_id(
     assert report.omitted_areas[0].available_tile_count == 2
 
 
+def test_filter_area_tileset_dependencies_records_tile_provider(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """Verify tile-id omissions name the enabled HAK providing the tileset."""
+
+    monkeypatch.setattr(
+        module_dependencies,
+        "_tileset_resources_from_nwn_install",
+        lambda _nwn_root: _tileset_index({"ttr01.set"}),
+    )
+    hak_dir = tmp_path / "hak"
+    area_dir = tmp_path / "areas"
+    hak_dir.mkdir()
+    area_dir.mkdir()
+    _write_hak(
+        hak_dir / "custom_tiles.hak",
+        ["custom01.set"],
+        tile_counts={"custom01.set": 2},
+    )
+    _write_area(area_dir / "bad_area.are", "custom01", tile_ids=[2])
+
+    report = filter_area_tileset_dependencies(
+        _settings("custom_tiles"),
+        {"bad_area.are": area_dir / "bad_area.are"},
+        hak_dir=hak_dir,
+        nwn_root=tmp_path / "nwn",
+    )
+
+    assert [omission.area_name for omission in report.omitted_areas] == ["bad_area"]
+    assert report.omitted_areas[0].tileset_provider == "custom_tiles.hak"
+
+
+def test_filter_area_tileset_dependencies_keeps_provider_with_selected_count(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """Verify duplicate tilesets do not name a lower-count HAK as provider."""
+
+    monkeypatch.setattr(
+        module_dependencies,
+        "_tileset_resources_from_nwn_install",
+        lambda _nwn_root: _tileset_index({"ttr01.set"}),
+    )
+    hak_dir = tmp_path / "hak"
+    area_dir = tmp_path / "areas"
+    hak_dir.mkdir()
+    area_dir.mkdir()
+    _write_hak(
+        hak_dir / "larger_tiles.hak",
+        ["custom01.set"],
+        tile_counts={"custom01.set": 5},
+    )
+    _write_hak(
+        hak_dir / "smaller_tiles.hak",
+        ["custom01.set"],
+        tile_counts={"custom01.set": 2},
+    )
+    _write_area(area_dir / "bad_area.are", "custom01", tile_ids=[5])
+
+    report = filter_area_tileset_dependencies(
+        _settings("larger_tiles smaller_tiles"),
+        {"bad_area.are": area_dir / "bad_area.are"},
+        hak_dir=hak_dir,
+        nwn_root=tmp_path / "nwn",
+    )
+
+    omission = report.omitted_areas[0]
+    assert omission.available_tile_count == 5
+    assert omission.tileset_provider == "larger_tiles.hak"
+
+
 def test_filter_area_tileset_dependencies_keeps_areas_when_base_install_unknown(
     tmp_path: Path,
 ) -> None:
@@ -125,7 +197,11 @@ def test_discover_available_tilesets_reports_missing_haks(
     )
     hak_dir = tmp_path / "hak"
     hak_dir.mkdir()
-    _write_hak(hak_dir / "present.hak", ["custom01.set"])
+    _write_hak(
+        hak_dir / "present.hak",
+        ["custom01.set"],
+        tile_counts={"custom01.set": 1},
+    )
 
     availability = discover_available_tilesets(
         ["present", "missing"],
@@ -134,6 +210,7 @@ def test_discover_available_tilesets_reports_missing_haks(
     )
 
     assert "custom01.set" in availability.resources
+    assert availability.tileset_providers["custom01.set"] == "present.hak"
     assert "ttr01.set" in availability.resources
     assert [issue.hak_name for issue in availability.missing_haks] == ["missing"]
 
@@ -167,11 +244,29 @@ def _write_area(path: Path, tileset: str, tile_ids: list[int] | None = None) -> 
     )
 
 
-def _write_hak(path: Path, filenames: list[str]) -> None:
+def _write_hak(
+    path: Path,
+    filenames: list[str],
+    tile_counts: dict[str, int] | None = None,
+) -> None:
     write_erf_archive(
         path,
         b"HAK ",
-        [(filename, b"placeholder") for filename in filenames],
+        [
+            (
+                filename,
+                _tileset_set(tile_counts[filename])
+                if tile_counts and filename in tile_counts
+                else b"placeholder",
+            )
+            for filename in filenames
+        ],
+    )
+
+
+def _tileset_set(tile_count: int) -> bytes:
+    return "\n".join(f"[TILE{tile_id}]" for tile_id in range(tile_count)).encode(
+        "latin-1"
     )
 
 

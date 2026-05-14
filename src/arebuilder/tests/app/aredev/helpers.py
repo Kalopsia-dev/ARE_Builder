@@ -168,7 +168,12 @@ def write_area(
     write_gff(path, gff.Struct(0xFFFFFFFF, **fields), "ARE ")
 
 
-def write_settings(path: Path, *, entry_area: str = "shared_only") -> None:
+def write_settings(
+    path: Path,
+    *,
+    entry_area: str = "shared_only",
+    haks: str = "",
+) -> None:
     """Write minimal module settings for Toolset dependency filtering."""
 
     path.mkdir(parents=True, exist_ok=True)
@@ -176,6 +181,7 @@ def write_settings(path: Path, *, entry_area: str = "shared_only") -> None:
         f"""
         name Test Module
         tag TEST_MODULE
+        haks {haks}
         entry_area {entry_area}
         entry_x 0.0
         entry_y 0.0

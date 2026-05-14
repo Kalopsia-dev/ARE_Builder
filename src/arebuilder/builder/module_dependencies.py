@@ -26,6 +26,7 @@ class AreaTilesetOmission:
     reason: str = "unavailable"
     required_tile_id: int | None = None
     available_tile_count: int | None = None
+    tileset_provider: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,6 +36,7 @@ class TilesetAvailability:
     resources: frozenset[str]
     base_tilesets_known: bool = True
     tile_counts: dict[str, int] = field(default_factory=dict)
+    tileset_providers: dict[str, str] = field(default_factory=dict)
     missing_haks: tuple[HakInspectionIssue, ...] = ()
     unreadable_haks: tuple[HakInspectionIssue, ...] = ()
 
@@ -107,6 +109,9 @@ def filter_area_tileset_dependencies(
                 reason=reason,
                 required_tile_id=max_tile_id if reason == "tile_index" else None,
                 available_tile_count=tile_count if reason == "tile_index" else None,
+                tileset_provider=availability.tileset_providers.get(tileset_resource)
+                if reason == "tile_index"
+                else None,
             )
         )
 
@@ -128,6 +133,7 @@ def discover_available_tilesets(
     base_index = _tileset_resources_from_nwn_install(nwn_root)
     resources = set(base_index.resources if base_index is not None else ())
     tile_counts = dict(base_index.tile_counts if base_index is not None else {})
+    tileset_providers: dict[str, str] = {}
 
     missing_haks: list[HakInspectionIssue] = []
     unreadable_haks: list[HakInspectionIssue] = []
@@ -154,12 +160,18 @@ def discover_available_tilesets(
             )
             continue
         resources.update(hak_index.resources)
-        _merge_tile_counts(tile_counts, hak_index.tile_counts)
+        _merge_tile_counts(
+            tile_counts,
+            hak_index.tile_counts,
+            tileset_providers,
+            hak_path.name,
+        )
 
     return TilesetAvailability(
         resources=frozenset(resources),
         base_tilesets_known=base_index is not None,
         tile_counts=tile_counts,
+        tileset_providers=tileset_providers,
         missing_haks=tuple(missing_haks),
         unreadable_haks=tuple(unreadable_haks),
     )
@@ -181,9 +193,7 @@ def area_tileset_usage(path: Path) -> tuple[str | None, int | None]:
         return None, None
     normalized = str(tileset).strip().lower()
     tile_ids = [
-        int(tile["Tile_ID"])
-        for tile in root.get("Tile_List", [])
-        if "Tile_ID" in tile
+        int(tile["Tile_ID"]) for tile in root.get("Tile_List", []) if "Tile_ID" in tile
     ]
     return normalized or None, max(tile_ids, default=None)
 
@@ -293,11 +303,21 @@ def _tileset_tile_count(data: bytes) -> int | None:
     return max(tile_ids) + 1 if tile_ids else None
 
 
-def _merge_tile_counts(target: dict[str, int], source: dict[str, int]) -> None:
+def _merge_tile_counts(
+    target: dict[str, int],
+    source: dict[str, int],
+    providers: dict[str, str] | None = None,
+    provider: str | None = None,
+) -> None:
     """Merge tileset counts, keeping the largest visible definition."""
 
     for resource_name, tile_count in source.items():
-        target[resource_name] = max(tile_count, target.get(resource_name, 0))
+        current_count = target.get(resource_name)
+        if current_count is not None and tile_count <= current_count:
+            continue
+        target[resource_name] = tile_count
+        if providers is not None and provider is not None:
+            providers[resource_name] = provider
 
 
 def _hak_path(hak_dir: Path, hak_name: str) -> Path:

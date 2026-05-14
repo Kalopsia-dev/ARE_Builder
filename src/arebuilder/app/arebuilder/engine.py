@@ -441,10 +441,14 @@ def _print_area_dependency_warnings(
 
     for omission in report.omitted_areas:
         if omission.reason == "tile_index":
+            warning = (
+                f"W: {omission.area_name}: Tile {omission.required_tile_id} "
+                f"is unavailable in {omission.tileset}.set; omitting area."
+            )
+            if omission.tileset_provider is not None:
+                warning += f" Please update {omission.tileset_provider}."
             print(
-                f"W: {omission.area_name}: Tile with ID "
-                f"{omission.required_tile_id} is unavailable; omitting area. "
-                f"Please update the HAK that provides {omission.tileset}.set.",
+                warning,
                 flush=True,
             )
             continue

@@ -1180,9 +1180,15 @@ class AREDevController:
             target_path=self.layout.module_archive_path(self.config.module_name),
         )
         workspace = ModuleBuildWorkspace.from_spec(module)
+        builder_settings = build_project_builder_settings(
+            layout=self.layout,
+            config=self.config,
+            live=False,
+            containerized=_in_builder_container(),
+        )
         report = workspace.filter_area_dependencies(
-            hak_dir=self.layout.hak_dir,
-            nwn_root=self.config.nwn_install_root,
+            hak_dir=builder_settings.hak_dir,
+            nwn_root=builder_settings.nwn_root,
         )
         _print_area_dependency_warnings(workspace.settings, report)
         omitted_areas = {
