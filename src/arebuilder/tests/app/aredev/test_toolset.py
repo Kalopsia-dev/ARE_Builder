@@ -68,12 +68,27 @@ def test_toolset_prunes_obsolete_resource_links(tmp_path: Path) -> None:
     stale_link.symlink_to(
         (layout.target_resources_dir("pgcc") / "removed.utc").resolve()
     )
+    moved_link = module_dir / "shared_only.are"
+    moved_link.symlink_to(
+        (layout.are_resources_dir / "gff" / "old" / "shared_only.are").resolve()
+    )
+    script_duplicate = layout.are_resources_dir / "scripts" / "duplicate.are"
+    script_duplicate.write_text("script duplicate", encoding="utf-8")
+    gff_duplicate = layout.are_resources_dir / "gff" / "duplicate.are"
+    gff_duplicate.write_text("gff duplicate", encoding="utf-8")
+    duplicate_link = module_dir / "duplicate.are"
+    duplicate_link.symlink_to(script_duplicate.resolve())
     unrelated_link = module_dir / "manual.utc"
     unrelated_link.symlink_to((tmp_path / "external" / "manual.utc").resolve())
 
     assert controller.run("toolset", []) == 0
 
     assert not stale_link.is_symlink()
+    assert_toolset_resource(
+        moved_link,
+        layout.are_resources_dir / "gff" / "shared_only.are",
+    )
+    assert_toolset_resource(duplicate_link, script_duplicate)
     assert unrelated_link.is_symlink()
 
 

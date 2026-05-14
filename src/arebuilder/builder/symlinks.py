@@ -82,15 +82,17 @@ def prune_stale_symlinks_for_all(
             builder_mount_root=builder_mount_root,
         )
 
-    active_links = {plan.link_path for plan in _deduplicate_symlink_plans(active_plans)}
+    active_targets = {(plan.link_path, plan.target_path) for plan in active_plans}
     removed = 0
     if not override_dir.exists():
         return removed
 
     for link_path in sorted(override_dir.iterdir()):
-        if link_path in active_links or not link_path.is_symlink():
+        if not link_path.is_symlink():
             continue
         target_path = os.readlink(link_path)
+        if (link_path, target_path) in active_targets:
+            continue
         if _target_is_under_mount_roots(
             target_path, shared_mount_roots
         ) or _target_is_direct_child_of_mount_root(target_path, compiled_mount_root):
@@ -177,15 +179,20 @@ def prune_stale_symlinks_for_target(
             builder_mount_root=builder_mount_root,
         )
 
-    active_links = {plan.link_path for plan in _deduplicate_symlink_plans(active_plans)}
+    active_targets = {
+        plan.link_path: plan.target_path
+        for plan in _deduplicate_symlink_plans(active_plans)
+    }
     removed = 0
     if not override_dir.exists():
         return removed
 
     for link_path in sorted(override_dir.iterdir()):
-        if link_path in active_links or not link_path.is_symlink():
+        if not link_path.is_symlink():
             continue
         target_path = os.readlink(link_path)
+        if active_targets.get(link_path) == target_path:
+            continue
         if _target_is_under_mount_roots(target_path, target_mount_roots):
             link_path.unlink()
             removed += 1

@@ -344,21 +344,33 @@ def test_all_prune_removes_only_obsolete_shared_links(tmp_path: Path) -> None:
     shared_root = tmp_path / "are-resources"
     compiled_root = tmp_path / "compiled-resources"
     current_gff = shared_root / "gff" / "area" / "current.are"
+    moved_gff = shared_root / "gff" / "new" / "moved.are"
+    duplicate_gff = shared_root / "gff" / "area" / "duplicate.are"
+    duplicate_override = shared_root / "override" / "duplicate.are"
     current_compiled = compiled_root / "current.ncs"
     target_compiled = compiled_root / "are-dev-test" / "target.ncs"
     for directory in (
         override_dir,
         current_gff.parent,
+        moved_gff.parent,
+        duplicate_override.parent,
         current_compiled.parent,
         target_compiled.parent,
     ):
         directory.mkdir(parents=True, exist_ok=True)
     current_gff.write_text("area", encoding="utf-8")
+    moved_gff.write_text("moved", encoding="utf-8")
+    duplicate_gff.write_text("gff duplicate", encoding="utf-8")
+    duplicate_override.write_text("override duplicate", encoding="utf-8")
     current_compiled.write_text("compiled", encoding="utf-8")
     target_compiled.write_text("target", encoding="utf-8")
 
     stale_gff_link = override_dir / "stale.are"
     stale_gff_link.symlink_to("/var/builder/are-resources/gff/area/stale.are")
+    moved_gff_link = override_dir / "moved.are"
+    moved_gff_link.symlink_to("/var/builder/are-resources/gff/old/moved.are")
+    duplicate_link = override_dir / "duplicate.are"
+    duplicate_link.symlink_to("/var/builder/are-resources/override/duplicate.are")
     stale_compiled_link = override_dir / "stale.ncs"
     stale_compiled_link.symlink_to("/var/builder/compiled-resources/stale.ncs")
     target_link = override_dir / "target.ncs"
@@ -379,8 +391,12 @@ def test_all_prune_removes_only_obsolete_shared_links(tmp_path: Path) -> None:
         active_plans=plans,
     )
 
-    assert removed == 2
+    assert removed == 3
     assert not stale_gff_link.is_symlink()
+    assert not moved_gff_link.is_symlink()
+    assert duplicate_link.readlink().as_posix() == (
+        "/var/builder/are-resources/override/duplicate.are"
+    )
     assert not stale_compiled_link.is_symlink()
     assert target_link.is_symlink()
     assert manual_file.exists()

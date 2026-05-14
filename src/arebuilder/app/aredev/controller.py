@@ -1168,12 +1168,15 @@ class AREDevController:
 
         if not toolset_module_dir.exists():
             return
-        active_links = {plan.link_path for plan in resource_plans}
+        active_targets = {(plan.link_path, plan.target_path) for plan in resource_plans}
         managed_roots = self._toolset_managed_target_roots()
         for link_path in sorted(toolset_module_dir.iterdir()):
-            if link_path in active_links or not link_path.is_symlink():
+            if not link_path.is_symlink():
                 continue
-            if _path_string_is_under_roots(os.readlink(link_path), managed_roots):
+            target_path = os.readlink(link_path)
+            if (link_path, target_path) in active_targets:
+                continue
+            if _path_string_is_under_roots(target_path, managed_roots):
                 link_path.unlink()
 
     def _toolset_managed_target_roots(self) -> tuple[str, ...]:
