@@ -6,11 +6,17 @@ from pathlib import Path
 from typing import Callable, Iterable
 
 from arebuilder.builder.archive import build_archive
+from arebuilder.builder.module_dependencies import (
+    AreaDependencyReport,
+    filter_area_tileset_dependencies,
+)
 from arebuilder.builder.module_file import build_module_ifo
 from arebuilder.builder.symlinks import (
     apply_symlink_plan,
     plan_symlinks_for_all,
     plan_symlinks_for_target,
+    prune_stale_symlinks_for_all,
+    prune_stale_symlinks_for_target,
 )
 from arebuilder.config.module_settings import ModuleSettings
 from arebuilder.config.runtime import BuildConfig, BuildModule, RuntimePaths
@@ -154,6 +160,11 @@ class BuildEngine:
     ) -> None:
         """Write the generated module metadata file and pack the final module archive."""
 
+        dependency_report = workspace.filter_area_dependencies(
+            hak_dir=self.runtime_paths.hak_dir,
+            nwn_root=self.runtime_paths.nwn_root,
+        )
+        _print_area_dependency_warnings(workspace.settings, dependency_report)
         workspace.write_module_file()
         print(f"Packing module: {module.name}", flush=True)
         workspace.pack_archive()
@@ -162,29 +173,43 @@ class BuildEngine:
         """Apply the full override symlink plan for shared and compiled resources."""
 
         print("Generating symlinks...", flush=True)
-        apply_symlink_plan(
-            plan_symlinks_for_all(
-                override_dir=self.runtime_paths.override_dir,
-                shared_root=self.runtime_paths.shared_root,
-                compiled_root=self.runtime_paths.compiled_root,
-                builder_mount_root=self.runtime_paths.builder_mount_root,
-            )
+        plans = plan_symlinks_for_all(
+            override_dir=self.runtime_paths.override_dir,
+            shared_root=self.runtime_paths.shared_root,
+            compiled_root=self.runtime_paths.compiled_root,
+            builder_mount_root=self.runtime_paths.builder_mount_root,
         )
+        prune_stale_symlinks_for_all(
+            override_dir=self.runtime_paths.override_dir,
+            shared_root=self.runtime_paths.shared_root,
+            compiled_root=self.runtime_paths.compiled_root,
+            builder_mount_root=self.runtime_paths.builder_mount_root,
+            active_plans=plans,
+        )
+        apply_symlink_plan(plans)
 
     def _apply_target_symlinks(self, module: BuildModule) -> None:
         """Apply override symlinks for one target module, replacing stale target links."""
 
         print("Generating symlinks...", flush=True)
-        apply_symlink_plan(
-            plan_symlinks_for_target(
-                target_name=module.name,
-                override_dir=self.runtime_paths.override_dir,
-                builder_root=self.runtime_paths.builder_root,
-                source_root=self.runtime_paths.module_source_root(module),
-                compiled_root=self.runtime_paths.compiled_root,
-                builder_mount_root=self.runtime_paths.builder_mount_root,
-            )
+        plans = plan_symlinks_for_target(
+            target_name=module.name,
+            override_dir=self.runtime_paths.override_dir,
+            builder_root=self.runtime_paths.builder_root,
+            source_root=self.runtime_paths.module_source_root(module),
+            compiled_root=self.runtime_paths.compiled_root,
+            builder_mount_root=self.runtime_paths.builder_mount_root,
         )
+        prune_stale_symlinks_for_target(
+            target_name=module.name,
+            override_dir=self.runtime_paths.override_dir,
+            builder_root=self.runtime_paths.builder_root,
+            source_root=self.runtime_paths.module_source_root(module),
+            compiled_root=self.runtime_paths.compiled_root,
+            builder_mount_root=self.runtime_paths.builder_mount_root,
+            active_plans=plans,
+        )
+        apply_symlink_plan(plans)
 
     def _compile_shared_scripts(self, selector: str | None) -> None:
         """Compile shared ARE scripts through the stateful direct command."""
@@ -336,6 +361,23 @@ class ModuleBuildWorkspace:
         module_ifo = build_module_ifo(self.settings, self.included_files)
         write_gff(self.build_dir / "module.ifo", module_ifo, "IFO ")
 
+    def filter_area_dependencies(
+        self,
+        *,
+        hak_dir: Path,
+        nwn_root: Path | None,
+    ) -> AreaDependencyReport:
+        """Remove areas that cannot load with the configured HAK list."""
+
+        report = filter_area_tileset_dependencies(
+            self.settings,
+            self.included_files,
+            hak_dir=hak_dir,
+            nwn_root=nwn_root,
+        )
+        self.included_files = report.included_files
+        return report
+
     def pack_archive(self) -> None:
         """Pack the module build directory into the configured final archive path."""
 
@@ -378,3 +420,61 @@ def _find_settings_file(source_dirs: list[Path]) -> Path | None:
         ),
         None,
     )
+
+
+def _print_area_dependency_warnings(
+    settings: ModuleSettings,
+    report: AreaDependencyReport,
+) -> None:
+    """Print warnings for dependency checks that changed the module area list."""
+
+    for issue in [
+        *report.availability.missing_haks,
+        *report.availability.unreadable_haks,
+    ]:
+        print(
+            "W: Enabled HAK "
+            f"{issue.hak_name!r} could not be inspected at "
+            f"{issue.path}: {issue.reason}.",
+            flush=True,
+        )
+
+    for omission in report.omitted_areas:
+        if omission.reason == "tile_index":
+            warning = (
+                f"W: {omission.area_name}: Tile {omission.required_tile_id} "
+                f"is unavailable in {omission.tileset}.set; omitting area."
+            )
+            if omission.tileset_provider is not None:
+                warning += f" Please update {omission.tileset_provider}."
+            print(
+                warning,
+                flush=True,
+            )
+            continue
+        print(
+            f"W: {omission.area_name}: Tileset {omission.tileset}.set "
+            "is unavailable; omitting area.",
+            flush=True,
+        )
+
+    entry_area = settings.entry_area.lower()
+    omitted_entry = [
+        omission
+        for omission in report.omitted_areas
+        if omission.area_name.lower() == entry_area
+    ]
+    if omitted_entry:
+        omission = omitted_entry[0]
+        if omission.reason == "tile_index":
+            raise ValueError(
+                "Entry area "
+                f"{settings.entry_area!r} uses unavailable tile ID "
+                f"{omission.required_tile_id} from tileset "
+                f"{omission.tileset}.set and cannot be omitted."
+            )
+        raise ValueError(
+            "Entry area "
+            f"{settings.entry_area!r} uses unavailable tileset "
+            f"{omission.tileset}.set and cannot be omitted."
+        )

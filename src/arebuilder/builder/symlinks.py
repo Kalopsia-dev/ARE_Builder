@@ -59,6 +59,48 @@ def plan_symlinks_for_all(
     return plans
 
 
+def prune_stale_symlinks_for_all(
+    *,
+    override_dir: Path,
+    shared_root: Path,
+    compiled_root: Path,
+    builder_mount_root: str = "/var/builder",
+    active_plans: list[PlannedSymlink] | None = None,
+) -> int:
+    """Remove obsolete override links owned by the shared all-mode plan."""
+
+    shared_mount_roots = (
+        f"{builder_mount_root}/are-resources/gff",
+        f"{builder_mount_root}/are-resources/override",
+    )
+    compiled_mount_root = f"{builder_mount_root}/compiled-resources"
+    if active_plans is None:
+        active_plans = plan_symlinks_for_all(
+            override_dir=override_dir,
+            shared_root=shared_root,
+            compiled_root=compiled_root,
+            builder_mount_root=builder_mount_root,
+        )
+
+    active_targets = {(plan.link_path, plan.target_path) for plan in active_plans}
+    removed = 0
+    if not override_dir.exists():
+        return removed
+
+    for link_path in sorted(override_dir.iterdir()):
+        if not link_path.is_symlink():
+            continue
+        target_path = os.readlink(link_path)
+        if (link_path, target_path) in active_targets:
+            continue
+        if _target_is_under_mount_roots(
+            target_path, shared_mount_roots
+        ) or _target_is_direct_child_of_mount_root(target_path, compiled_mount_root):
+            link_path.unlink()
+            removed += 1
+    return removed
+
+
 def plan_symlinks_for_target(
     *,
     target_name: str,
@@ -102,6 +144,61 @@ def plan_symlinks_for_target(
     return plans
 
 
+def prune_stale_symlinks_for_target(
+    *,
+    target_name: str,
+    override_dir: Path,
+    builder_root: Path,
+    compiled_root: Path,
+    source_root: Path | None = None,
+    builder_mount_root: str = "/var/builder",
+    active_plans: list[PlannedSymlink] | None = None,
+) -> int:
+    """Remove obsolete override links owned by the target link plan."""
+
+    target_source_root = source_root or _default_target_source_root(
+        builder_root, target_name
+    )
+    source_mount_root = _mounted_source_root(
+        builder_root=builder_root,
+        source_root=target_source_root,
+        builder_mount_root=builder_mount_root,
+        fallback_name=target_name,
+    )
+    target_mount_roots = (
+        source_mount_root,
+        f"{builder_mount_root}/compiled-resources/{target_name}",
+    )
+    if active_plans is None:
+        active_plans = plan_symlinks_for_target(
+            target_name=target_name,
+            override_dir=override_dir,
+            builder_root=builder_root,
+            compiled_root=compiled_root,
+            source_root=source_root,
+            builder_mount_root=builder_mount_root,
+        )
+
+    active_targets = {
+        plan.link_path: plan.target_path
+        for plan in _deduplicate_symlink_plans(active_plans)
+    }
+    removed = 0
+    if not override_dir.exists():
+        return removed
+
+    for link_path in sorted(override_dir.iterdir()):
+        if not link_path.is_symlink():
+            continue
+        target_path = os.readlink(link_path)
+        if active_targets.get(link_path) == target_path:
+            continue
+        if _target_is_under_mount_roots(target_path, target_mount_roots):
+            link_path.unlink()
+            removed += 1
+    return removed
+
+
 def _default_target_source_root(builder_root: Path, target_name: str) -> Path:
     """Return the conventional resource root for a target name."""
 
@@ -126,6 +223,33 @@ def _mounted_source_root(
         # the fallback keeps the target path predictable for generated projects.
         return f"{builder_mount_root}/{fallback_name}"
     return f"{builder_mount_root}/{relative_source_root.as_posix()}"
+
+
+def _target_is_under_mount_roots(
+    target_path: str,
+    mount_roots: tuple[str, ...],
+) -> bool:
+    """Return whether a symlink target belongs to one of the mounted roots."""
+
+    normalized_target = target_path.rstrip("/")
+    for mount_root in mount_roots:
+        normalized_root = mount_root.rstrip("/")
+        if normalized_target == normalized_root or normalized_target.startswith(
+            f"{normalized_root}/"
+        ):
+            return True
+    return False
+
+
+def _target_is_direct_child_of_mount_root(target_path: str, mount_root: str) -> bool:
+    """Return whether a symlink target is a direct child of a mounted root."""
+
+    normalized_target = target_path.rstrip("/")
+    normalized_root = mount_root.rstrip("/")
+    prefix = f"{normalized_root}/"
+    if not normalized_target.startswith(prefix):
+        return False
+    return "/" not in normalized_target[len(prefix) :]
 
 
 def count_symlink_plan_steps(plans: list[PlannedSymlink]) -> int:

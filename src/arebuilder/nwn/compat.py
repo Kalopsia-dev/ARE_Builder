@@ -106,6 +106,14 @@ def read_erf_members(path: Path) -> dict[str, bytes]:
         }
 
 
+def list_erf_filenames(path: Path) -> list[str]:
+    """Return ERF-like archive member names without reading member payloads."""
+
+    with path.open("rb") as handle:
+        reader = erf.Reader(handle)
+        return sorted(reader.filenames)
+
+
 def normalize_gff(value) -> Any:
     """Convert GFF values into plain Python data for semantic comparisons."""
 

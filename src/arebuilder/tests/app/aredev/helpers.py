@@ -4,10 +4,12 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from nwn import gff
 
 from arebuilder.app.aredev import AREDevController, ProcessResult
 from arebuilder.app.aredev.project import ProjectLayout, load_arebuilder_env
 from arebuilder.app.aredev.scaffold import initialize_aredev_project
+from arebuilder.nwn.compat import write_gff
 
 FAKE_HOST_ROOT = "/host/project"
 FAKE_HOST_NWN_INSTALL_ROOT = "/host/nwn-install"
@@ -118,9 +120,9 @@ def stage_toolset_sources(layout: ProjectLayout) -> dict[str, Path]:
     module_path.write_bytes(b"module")
 
     shared_only = layout.are_resources_dir / "gff" / "shared_only.are"
-    shared_only.write_text("shared only", encoding="utf-8")
+    write_area(shared_only)
     shared_duplicate = layout.are_resources_dir / "gff" / "shared.are"
-    shared_duplicate.write_text("shared duplicate", encoding="utf-8")
+    write_area(shared_duplicate)
 
     script_dir = layout.are_resources_dir / "scripts"
     script_dir.mkdir(parents=True)
@@ -132,7 +134,8 @@ def stage_toolset_sources(layout: ProjectLayout) -> dict[str, Path]:
     target = target_dir / "target.utc"
     target.write_text("target", encoding="utf-8")
     target_shared = target_dir / "shared.are"
-    target_shared.write_text("target duplicate", encoding="utf-8")
+    write_area(target_shared)
+    write_settings(layout.are_resources_dir / "gff")
 
     compiled_dir = layout.build_dir("are-dev-pgcc")
     compiled_dir.mkdir(parents=True)
@@ -148,6 +151,45 @@ def stage_toolset_sources(layout: ProjectLayout) -> dict[str, Path]:
         "target_shared": target_shared,
         "compiled": compiled,
     }
+
+
+def write_area(
+    path: Path,
+    tileset: str | None = None,
+    tile_ids: list[int] | None = None,
+) -> None:
+    """Write a minimal ARE resource for Toolset tests."""
+
+    fields = {"Tileset": gff.ResRef(tileset)} if tileset is not None else {}
+    if tile_ids is not None:
+        fields["Tile_List"] = gff.List(
+            [gff.Struct(0, Tile_ID=gff.Int(tile_id)) for tile_id in tile_ids]
+        )
+    write_gff(path, gff.Struct(0xFFFFFFFF, **fields), "ARE ")
+
+
+def write_settings(
+    path: Path,
+    *,
+    entry_area: str = "shared_only",
+    haks: str = "",
+) -> None:
+    """Write minimal module settings for Toolset dependency filtering."""
+
+    path.mkdir(parents=True, exist_ok=True)
+    (path / "settings.txt").write_text(
+        f"""
+        name Test Module
+        tag TEST_MODULE
+        haks {haks}
+        entry_area {entry_area}
+        entry_x 0.0
+        entry_y 0.0
+        entry_z 0.0
+        entry_facing 0.0
+        """,
+        encoding="utf-8",
+    )
 
 
 def assert_toolset_resource(

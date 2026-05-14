@@ -25,6 +25,10 @@ from prompt_toolkit.key_binding.bindings import completion as completion_binding
 from prompt_toolkit.shortcuts.prompt import CompleteStyle
 
 from arebuilder.app.arebuilder.build_command import execute_build_command
+from arebuilder.app.arebuilder.engine import (
+    ModuleBuildWorkspace,
+    _print_area_dependency_warnings,
+)
 from arebuilder.app.aredev.host_bridge import (
     HOST_COMMAND_DIR,
     HOST_DOCKER_TIMEOUT_SECONDS,
@@ -52,6 +56,7 @@ from arebuilder.builder.symlinks import (
     count_symlink_plan_steps,
 )
 from arebuilder.config.nwn_paths import find_nwn_client_executable
+from arebuilder.config.runtime import BuildModule
 
 COMPOSE_ARGS = ["docker", "compose", "--progress", "quiet"]
 AREDEV_PROJECT = "aredev"
@@ -489,6 +494,8 @@ class AREDevController:
 
         package_after = _installed_arebuilder_version()
         package_changed = package_before != package_after
+        if package_changed and package_after is not None:
+            self.output(f"Updated arebuilder to version {package_after}.")
         container_status = self._update_containers()
         return self._handle_native_update_restart(package_changed, container_status)
 
@@ -555,6 +562,9 @@ class AREDevController:
     def build(self) -> int:
         """Validate runtime paths, run the configured builder, and surface build failures."""
 
+        if self._is_server_running():
+            self.output("Server is running.")
+            return 1
         if not self._validate_target_resources():
             return 1
         if not self._prepare_runtime_environment():
@@ -1041,11 +1051,13 @@ class AREDevController:
 
         self.output("Planning symlinks...")
         resource_plans = self._toolset_symlink_plans(toolset_module_dir)
+        resource_plans = self._filter_toolset_area_dependency_plans(resource_plans)
         copy_mode = _in_builder_container() and host_path_looks_windows(
             os.environ.get("AREDEV_HOST_ROOT", "")
         )
         manifest_entries = self._load_toolset_manifest_entries() if copy_mode else {}
         next_manifest_entries: dict[str, dict[str, object]] = {}
+        resource_keys = {f"resource:{plan.link_path.name}" for plan in resource_plans}
         resource_work = (
             len(resource_plans)
             if copy_mode
@@ -1054,6 +1066,11 @@ class AREDevController:
         progress = self.toolset_progress_factory(resource_work + 1)
         try:
             if copy_mode:
+                self._prune_toolset_manifest_entries(
+                    toolset_module_dir=toolset_module_dir,
+                    manifest_entries=manifest_entries,
+                    active_resource_keys=resource_keys,
+                )
                 self._copy_toolset_resources(
                     resource_plans,
                     manifest_entries=manifest_entries,
@@ -1061,6 +1078,10 @@ class AREDevController:
                     progress=progress,
                 )
             else:
+                self._prune_stale_toolset_symlinks(
+                    toolset_module_dir=toolset_module_dir,
+                    resource_plans=resource_plans,
+                )
                 apply_symlink_plan(resource_plans, progress=progress.update)
 
             module_destination = modules_root / module_path.name
@@ -1142,6 +1163,80 @@ class AREDevController:
             )
         )
         return plans
+
+    def _filter_toolset_area_dependency_plans(
+        self,
+        resource_plans: list[PlannedSymlink],
+    ) -> list[PlannedSymlink]:
+        """Remove Toolset area resources that cannot load with enabled HAKs."""
+
+        module = BuildModule(
+            name=self.config.module_name,
+            source_dirs=[
+                self.layout.are_resources_dir / "gff",
+                self.layout.target_resources_dir(self.config.build_target),
+            ],
+            build_dir=self.layout.build_dir(self.config.module_name),
+            target_path=self.layout.module_archive_path(self.config.module_name),
+        )
+        workspace = ModuleBuildWorkspace.from_spec(module)
+        builder_settings = build_project_builder_settings(
+            layout=self.layout,
+            config=self.config,
+            live=False,
+            containerized=_in_builder_container(),
+        )
+        report = workspace.filter_area_dependencies(
+            hak_dir=builder_settings.hak_dir,
+            nwn_root=builder_settings.nwn_root,
+        )
+        _print_area_dependency_warnings(workspace.settings, report)
+        omitted_areas = {
+            omission.area_name.lower() for omission in report.omitted_areas
+        }
+        if not omitted_areas:
+            return resource_plans
+        area_suffixes = {".are", ".git", ".gic"}
+        return [
+            plan
+            for plan in resource_plans
+            if not (
+                plan.link_path.suffix.lower() in area_suffixes
+                and plan.link_path.stem.lower() in omitted_areas
+            )
+        ]
+
+    def _prune_stale_toolset_symlinks(
+        self,
+        *,
+        toolset_module_dir: Path,
+        resource_plans: Sequence[PlannedSymlink],
+    ) -> None:
+        """Remove obsolete symlinks owned by the Toolset resource bundle."""
+
+        if not toolset_module_dir.exists():
+            return
+        active_targets = {(plan.link_path, plan.target_path) for plan in resource_plans}
+        managed_roots = self._toolset_managed_target_roots()
+        for link_path in sorted(toolset_module_dir.iterdir()):
+            if not link_path.is_symlink():
+                continue
+            target_path = os.readlink(link_path)
+            if (link_path, target_path) in active_targets:
+                continue
+            if _path_string_is_under_roots(target_path, managed_roots):
+                link_path.unlink()
+
+    def _toolset_managed_target_roots(self) -> tuple[str, ...]:
+        """Return target strings for source roots managed by the Toolset bundle."""
+
+        roots = (
+            self.layout.are_resources_dir / "gff",
+            self.layout.are_resources_dir / "scripts",
+            self.layout.target_resources_dir(self.config.build_target),
+            self.layout.build_dir(self.config.module_name),
+        )
+        return tuple(self._toolset_source_target(root) for root in roots)
 
     def _toolset_directory_plans(
         self,
@@ -1246,6 +1341,27 @@ class AREDevController:
         finally:
             progress.update()
 
+    def _prune_toolset_manifest_entries(
+        self,
+        *,
+        toolset_module_dir: Path,
+        manifest_entries: Mapping[str, Mapping[str, object]],
+        active_resource_keys: set[str],
+    ) -> None:
+        """Remove obsolete Toolset copies tracked by the previous manifest."""
+
+        for key, entry in manifest_entries.items():
+            if key in active_resource_keys or entry.get("kind") != "resource":
+                continue
+            destination_name = entry.get("destination")
+            if not isinstance(destination_name, str):
+                continue
+            if not destination_name or Path(destination_name).name != destination_name:
+                continue
+            destination_path = toolset_module_dir / destination_name
+            if self._toolset_manifest_destination_matches(entry, destination_path):
+                destination_path.unlink()
+
     def _load_toolset_manifest_entries(self) -> dict[str, Mapping[str, object]]:
         """Load the Windows Docker Toolset copy manifest entries."""
 
@@ -1317,12 +1433,30 @@ class AREDevController:
             return False
         try:
             source_stat = source_path.stat()
-            destination_stat = destination_path.stat()
         except OSError:
+            return False
+        if not self._toolset_manifest_destination_matches(entry, destination_path):
             return False
         return (
             entry.get("source_size") == source_stat.st_size
             and entry.get("source_mtime_ns") == source_stat.st_mtime_ns
+        )
+
+    def _toolset_manifest_destination_matches(
+        self,
+        entry: Mapping[str, object],
+        destination_path: Path,
+    ) -> bool:
+        """Return whether a Toolset manifest entry still owns the destination."""
+
+        if destination_path.is_symlink() or not destination_path.is_file():
+            return False
+        try:
+            destination_stat = destination_path.stat()
+        except OSError:
+            return False
+        return (
+            entry.get("destination") == destination_path.name
             and entry.get("destination_size") == destination_stat.st_size
             and entry.get("destination_mtime_ns") == destination_stat.st_mtime_ns
         )
@@ -1829,6 +1963,21 @@ def _ensure_directory_symlink(*, link_path: Path, target_path: Path) -> None:
                 pass
         link_path.mkdir(parents=True, exist_ok=True)
         raise
+
+
+def _path_string_is_under_roots(path: str, roots: Sequence[str]) -> bool:
+    """Return whether a host-visible path string belongs to any managed root."""
+
+    normalized_path = path.rstrip("/\\")
+    for root in roots:
+        normalized_root = root.rstrip("/\\")
+        if normalized_path == normalized_root:
+            return True
+        if normalized_path.startswith(f"{normalized_root}/"):
+            return True
+        if normalized_path.startswith(f"{normalized_root}\\"):
+            return True
+    return False
 
 
 def _path_is_junction(path: Path) -> bool:
