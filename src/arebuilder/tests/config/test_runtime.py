@@ -157,6 +157,9 @@ def test_builder_runtime_resolves_project_layout(tmp_path: Path, monkeypatch) ->
     assert runtime.paths.hak_dir == fixture.hak_dir
     assert runtime.paths.tlk_dir == fixture.tlk_dir
     assert runtime.paths.state_file == fixture.root / "temp" / "script_index.json"
+    assert runtime.paths.target_state_file(module) == (
+        fixture.root / "temp" / "script_index_synthetic.json"
+    )
     assert runtime.paths.nwn_root == RuntimePaths.default_nwn_root
 
 

@@ -218,12 +218,13 @@ class ScriptIndex:
         }
 
     def get_modified(self, state_path: Path) -> set[Script]:
-        """Return primary scripts whose content hash differs from the saved state."""
+        """Return indexed local scripts whose content hash differs from saved state."""
 
         hash_index = read_hash_index(state_path)
         return {
             script
-            for script in self.primary_scripts()
+            for script in self
+            if script.contents
             if script.name not in hash_index or hash_index[script.name] != script.hash
         }
 
@@ -742,22 +743,19 @@ class StatefulScriptCompiler:
             raise CompileError("A state path is required to update script hashes.")
         hashes = read_hash_index(self.state_path)
         hashes.update(
-            {
-                script.name: script.hash
-                for script in modified
-                if script.primary and script.contents
-            }
+            {script.name: script.hash for script in modified if script.contents}
         )
         return hashes
 
     def _hash_all(self) -> dict[str, int] | None:
-        """Build a complete hash index for every primary script currently indexed."""
+        """Build a complete hash index for every indexed local script."""
 
         if not self.use_state:
             return None
         return {
             script.name: script.hash
-            for script in self._require_index().primary_scripts()
+            for script in self._require_index()
+            if script.contents
         }
 
     def _require_index(self) -> ScriptIndex:

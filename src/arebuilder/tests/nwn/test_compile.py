@@ -307,6 +307,60 @@ def test_target_compile_uses_shared_includes_but_writes_only_primary_outputs(
     assert {path.name for path in output_dir.glob("*.ncs")} == {"target_main.ncs"}
 
 
+def test_stateful_target_compile_tracks_shared_include_changes(
+    tmp_path: Path,
+) -> None:
+    """Verify stateful target compiles rebuild dependents of shared includes."""
+
+    script_dir = tmp_path / "target" / "scripts"
+    shared_dir = tmp_path / "are-resources" / "scripts"
+    output_dir = tmp_path / "compiled" / "target"
+    state_path = tmp_path / "temp" / "script_index_pgcc.json"
+    script_dir.mkdir(parents=True)
+    shared_dir.mkdir(parents=True)
+    output_dir.mkdir(parents=True)
+    _write_script(shared_dir / "inc_shared.nss", "int helper() { return 1; }")
+    _write_script(
+        script_dir / "target_main.nss",
+        '#include "inc_shared"\nvoid main() { int x = helper(); }',
+    )
+
+    first_result = compile_scripts(
+        script_dir=script_dir,
+        output_dir=output_dir,
+        state_path=state_path,
+        include_dirs=[shared_dir],
+        clear_output_on_all=False,
+        compiler_factory=fake_compiler_factory,
+    )
+    second_result = compile_scripts(
+        script_dir=script_dir,
+        output_dir=output_dir,
+        state_path=state_path,
+        include_dirs=[shared_dir],
+        clear_output_on_all=False,
+        compiler_factory=fake_compiler_factory,
+    )
+    _write_script(shared_dir / "inc_shared.nss", "int helper() { return 2; }")
+    changed_include_result = compile_scripts(
+        script_dir=script_dir,
+        output_dir=output_dir,
+        state_path=state_path,
+        include_dirs=[shared_dir],
+        clear_output_on_all=False,
+        compiler_factory=fake_compiler_factory,
+    )
+
+    assert first_result.compiled_count == 1
+    assert second_result.compiled_count == 0
+    assert changed_include_result.compiled_count == 1
+    assert {path.name for path in output_dir.glob("*.ncs")} == {"target_main.ncs"}
+    assert json.loads(state_path.read_text(encoding="utf-8")).keys() == {
+        "inc_shared",
+        "target_main",
+    }
+
+
 @pytest.mark.skipif(
     os.name == "nt",
     reason="Creating symlinks on Windows can require elevated privileges.",

@@ -238,21 +238,22 @@ class BuildEngine:
         if not script_dir.is_dir():
             return
 
-        print("Compiling module scripts...", flush=True)
-        self._run_quietly_on_success(
+        result = self._run_quietly_on_success(
             lambda: self.script_compiler(
                 script_dir=script_dir,
                 output_dir=workspace.build_dir,
-                selector="all",
-                state_path=None,
+                selector=None,
+                state_path=self.runtime_paths.target_state_file(module),
                 nwn_root=self.runtime_paths.nwn_root,
                 include_dirs=self.runtime_paths.target_include_dirs(),
                 secondary_output_dir=None,
                 num_workers=self.runtime_paths.compile_workers,
-                use_state=False,
+                use_state=True,
                 clear_output_on_all=False,
             )
         )
+        if getattr(result, "compiled_count", 0) > 0:
+            print("Compiling module scripts...", flush=True)
 
     def _copy_precompiled_scripts(self, module: BuildModule, build_dir: Path) -> None:
         """Flatten conventional precompiled files into the build directory."""
