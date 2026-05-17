@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from importlib import resources
 from pathlib import Path
 from typing import Literal
 
@@ -242,7 +243,7 @@ def load_arebuilder_env(root: Path | str) -> BuilderConfig:
     """Load project-local AREDev settings from an initialized project root."""
 
     layout = ProjectLayout.from_root(root)
-    values = _default_config_values()
+    values = _template_config_values()
     config_path = layout.arebuilder_env_path
     if not config_path.exists():
         raise BuilderConfigError(f"Missing builder configuration: {config_path}")
@@ -309,8 +310,7 @@ def render_arebuilder_env(
     validate_build_target(build_target, error_type=BuilderConfigError)
     _validate_backend(builder_backend)
     inferred_paths = infer_project_paths(system=system)
-    values = _default_config_values()
-    values.update(
+    return _render_arebuilder_env_template(
         {
             "BUILD_TARGET": build_target,
             "BUILDER_BACKEND": builder_backend,
@@ -325,9 +325,6 @@ def render_arebuilder_env(
             else inferred_paths.docker_executable,
         }
     )
-    # Stable env ordering makes regenerated scaffolds easy to review and keeps
-    # tests focused on intentional value changes.
-    return _format_env_values(values)
 
 
 def build_project_builder_settings(
@@ -362,44 +359,64 @@ def load_env_file(path: Path) -> dict[str, str]:
 def _build_config(values: dict[str, str]) -> BuilderConfig:
     """Construct the single-target BuildConfig from resolved runtime paths."""
 
-    backend = values.get("BUILDER_BACKEND", "native").strip().lower()
+    defaults = BuilderConfig()
+    backend = values.get("BUILDER_BACKEND", defaults.builder_backend).strip().lower()
     _validate_backend(backend)
-    build_target = values.get("BUILD_TARGET", "pgcc").strip()
+    build_target = values.get("BUILD_TARGET", defaults.build_target).strip()
     validate_build_target(build_target, error_type=BuilderConfigError)
     return BuilderConfig(
         build_target=build_target,
         builder_backend=backend,  # type: ignore[arg-type]
-        arebuilder_repo=values.get("AREBUILDER_REPO", DEFAULT_AREBUILDER_REPO),
-        builder_image=values.get("BUILDER_IMAGE", "kalopsiadev/arebuilder:latest"),
-        nwserver_image=values.get("NWSERVER_IMAGE", "dmhoodoo/aredevnwnxserver:latest"),
-        nwn_install_path=values.get("NWN_INSTALL_PATH", ""),
-        nwn_home_path=values.get("NWN_HOME_PATH", ""),
-        docker_executable=values.get("DOCKER_EXECUTABLE", ""),
+        arebuilder_repo=values.get("AREBUILDER_REPO", defaults.arebuilder_repo),
+        builder_image=values.get("BUILDER_IMAGE", defaults.builder_image),
+        nwserver_image=values.get("NWSERVER_IMAGE", defaults.nwserver_image),
+        nwn_install_path=values.get("NWN_INSTALL_PATH", defaults.nwn_install_path),
+        nwn_home_path=values.get("NWN_HOME_PATH", defaults.nwn_home_path),
+        docker_executable=values.get(
+            "DOCKER_EXECUTABLE",
+            defaults.docker_executable,
+        ),
     )
 
 
-def _default_config_values() -> dict[str, str]:
-    """Return scaffold defaults for an AREDev project config file."""
+def _template_config_values() -> dict[str, str]:
+    """Return scaffold defaults parsed from the packaged AREDev env template."""
 
-    return {
-        "BUILD_TARGET": "pgcc",
-        "BUILDER_BACKEND": "native",
-        "AREBUILDER_REPO": DEFAULT_AREBUILDER_REPO,
-        "BUILDER_IMAGE": "kalopsiadev/arebuilder:latest",
-        "NWSERVER_IMAGE": "dmhoodoo/aredevnwnxserver:latest",
-        "NWN_INSTALL_PATH": "",
-        "NWN_HOME_PATH": "",
-        "DOCKER_EXECUTABLE": "",
-    }
+    return parse_key_value_text(_read_arebuilder_env_template())
 
 
-def _format_env_values(values: dict[str, str]) -> str:
-    """Serialize environment values in stable key order for generated config files."""
+def _render_arebuilder_env_template(values: dict[str, str]) -> str:
+    """Render the packaged env template with selected concrete init values."""
 
-    lines = ["# AREDev project settings"]
-    for key, value in values.items():
-        lines.append(f"{key}={_quote_config_value(value)}")
-    return "\n".join(lines) + "\n"
+    path_like_keys = {"NWN_INSTALL_PATH", "NWN_HOME_PATH", "DOCKER_EXECUTABLE"}
+    missing_keys = set(values)
+    rendered_lines: list[str] = []
+    for line in _read_arebuilder_env_template().splitlines():
+        key, separator, _value = line.partition("=")
+        if separator and key in values:
+            value = values[key]
+            if key in path_like_keys:
+                value = _quote_config_value(value)
+            rendered_lines.append(f"{key}={value}")
+            missing_keys.remove(key)
+            continue
+        rendered_lines.append(line)
+
+    if missing_keys:
+        missing = ", ".join(sorted(missing_keys))
+        raise BuilderConfigError(
+            f"AREDev config template is missing required key(s): {missing}"
+        )
+    return "\n".join(rendered_lines) + "\n"
+
+
+def _read_arebuilder_env_template() -> str:
+    """Read the packaged AREDev builder env template."""
+
+    template_root = resources.files("arebuilder").joinpath("templates", "aredev")
+    return template_root.joinpath("config", AREBUILDER_ENV_FILENAME).read_text(
+        encoding="utf-8"
+    )
 
 
 def _quote_config_value(value: str | Path) -> str:

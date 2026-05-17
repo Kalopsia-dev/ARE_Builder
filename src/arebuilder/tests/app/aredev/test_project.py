@@ -68,7 +68,8 @@ def test_render_arebuilder_env_populates_detected_docker_starter(
 ) -> None:
     """Verify generated env files include a detected Docker starter executable."""
 
-    starter = tmp_path / "docker-starter"
+    starter = tmp_path / "Docker Apps" / "docker-starter"
+    starter.parent.mkdir()
     starter.write_text("", encoding="utf-8")
     monkeypatch.setattr(
         "arebuilder.app.aredev.project.resolve_nwn_install_root",
@@ -85,7 +86,7 @@ def test_render_arebuilder_env_populates_detected_docker_starter(
 
     arebuilder_env = render_arebuilder_env()
 
-    assert f"DOCKER_EXECUTABLE={starter}\n" in arebuilder_env
+    assert f'DOCKER_EXECUTABLE="{starter}"\n' in arebuilder_env
 
 
 def test_render_arebuilder_env_leaves_docker_starter_empty_when_unknown(
