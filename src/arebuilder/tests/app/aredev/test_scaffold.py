@@ -202,6 +202,7 @@ def test_init_creates_expected_scaffold_without_resource_artifacts(
     for command in [
         "container_status",
         "compose",
+        "down_timeout",
         "down_quiet",
         "pull_ignore_failures",
         "volume_drop",
@@ -223,6 +224,8 @@ def test_init_creates_expected_scaffold_without_resource_artifacts(
     assert '"$launcher" bridge "$AREDEV_ROOT" &' in shell_launcher
     assert "--ignore-pull-failures" in shell_launcher
     assert "docker compose --progress quiet" in shell_launcher
+    assert "down --timeout 1" in shell_launcher
+    assert "sleep 0.25" in shell_launcher
     assert 'client_dir=$(dirname "$client")' in shell_launcher
     assert 'cd "$client_dir"' in shell_launcher
     assert os.access(project / "AREDev.sh", os.X_OK)
@@ -274,6 +277,7 @@ def test_init_generates_windows_batch_wrapper_without_shell_wrapper(
     for command in [
         "container_status",
         "compose",
+        "down_timeout",
         "down_quiet",
         "pull_ignore_failures",
         "volume_drop",
@@ -289,6 +293,7 @@ def test_init_generates_windows_batch_wrapper_without_shell_wrapper(
     assert 'ValidateSet("prepare", "bridge", "update")' in powershell_launcher
     assert "--ignore-pull-failures" in powershell_launcher
     assert "docker compose --progress quiet" in powershell_launcher
+    assert "down --timeout 1" in powershell_launcher
     assert "-WorkingDirectory (Split-Path -Parent $client)" in powershell_launcher
 
 

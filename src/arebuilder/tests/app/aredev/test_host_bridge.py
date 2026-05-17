@@ -68,7 +68,7 @@ def test_containerized_stop_uses_host_bridge(
 
     compose_request = read_host_request(layout, "compose")
     assert compose_request["COMMAND"] == "compose"
-    assert compose_request["ACTION"] == "down"
+    assert compose_request["ACTION"] == "down_timeout"
     assert not (layout.development_dir / "live.ncs").exists()
     assert output == ["Stopping server...", "Cleaning development folder..."]
     assert build_calls == []

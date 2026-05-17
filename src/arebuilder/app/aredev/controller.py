@@ -30,6 +30,7 @@ from arebuilder.app.arebuilder.engine import (
     _print_area_dependency_warnings,
 )
 from arebuilder.app.aredev.host_bridge import (
+    COMPOSE_STOP_TIMEOUT_SECONDS,
     HOST_COMMAND_DIR,
     HOST_DOCKER_TIMEOUT_SECONDS,
     HOST_LAUNCH_TIMEOUT_SECONDS,
@@ -617,7 +618,9 @@ class AREDevController:
             return 0
 
         self.output("Stopping server...")
-        result = self._run_compose(["down"])
+        result = self._run_compose(
+            ["down", "--timeout", str(COMPOSE_STOP_TIMEOUT_SECONDS)]
+        )
         if result.returncode != 0:
             return self._report_process_failure(result)
         self.output("Cleaning development folder...")

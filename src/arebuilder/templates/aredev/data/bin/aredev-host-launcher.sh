@@ -483,6 +483,10 @@ run_compose_action() {
             output=$(docker compose --progress quiet --project-directory "$AREDEV_ROOT" --env-file "$CONFIG_FILE" -p "$AREDEV_PROJECT" down 2>&1)
             status=$?
             ;;
+        down_timeout)
+            output=$(docker compose --progress quiet --project-directory "$AREDEV_ROOT" --env-file "$CONFIG_FILE" -p "$AREDEV_PROJECT" down --timeout 1 2>&1)
+            status=$?
+            ;;
         down_quiet)
             output=$(docker compose --progress quiet --project-directory "$AREDEV_ROOT" --env-file "$CONFIG_FILE" -p "$AREDEV_PROJECT" down 2>&1)
             status=$?
@@ -696,7 +700,7 @@ run_bridge_loop() {
             fi
         done
 
-        sleep 1
+        sleep 0.25
     done
 }
 

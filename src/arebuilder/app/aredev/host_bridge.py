@@ -11,6 +11,7 @@ HOST_COMMAND_DIR = "host-commands"
 HOST_LAUNCH_TIMEOUT_SECONDS = 10.0
 HOST_DOCKER_TIMEOUT_SECONDS = 600.0
 HOST_LAUNCH_POLL_SECONDS = 0.1
+COMPOSE_STOP_TIMEOUT_SECONDS = 1
 
 
 def host_path_looks_windows(path: str) -> bool:
@@ -124,6 +125,8 @@ def _compose_host_action(args: list[str]) -> str | None:
 
     if args == ["up", "-d", "nwserver"]:
         return "up_nwserver"
+    if args == ["down", "--timeout", str(COMPOSE_STOP_TIMEOUT_SECONDS)]:
+        return "down_timeout"
     if args == ["--progress", "quiet", "down"]:
         return "down_quiet"
     if args == ["down"]:

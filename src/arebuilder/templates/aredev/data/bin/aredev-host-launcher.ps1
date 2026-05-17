@@ -435,6 +435,11 @@ function Invoke-ComposeAction {
             docker compose --progress quiet --project-directory $script:ProjectRootPath --env-file $script:ConfigFile -p $script:AredevProject down
         }
     }
+    elseif ($action -eq "down_timeout") {
+        $result = Invoke-CapturedCommand {
+            docker compose --progress quiet --project-directory $script:ProjectRootPath --env-file $script:ConfigFile -p $script:AredevProject down --timeout 1
+        }
+    }
     elseif ($action -eq "down_quiet") {
         $result = Invoke-CapturedCommand {
             docker compose --progress quiet --project-directory $script:ProjectRootPath --env-file $script:ConfigFile -p $script:AredevProject down
