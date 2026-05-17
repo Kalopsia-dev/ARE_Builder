@@ -173,6 +173,7 @@ def test_init_creates_expected_scaffold_without_resource_artifacts(
         == "https://github.com/Kalopsia-dev/ARE_Builder.git"
     )
     assert arebuilder_env["NWSERVER_IMAGE"] == "dmhoodoo/aredevnwnxserver:latest"
+    assert "DOCKER_EXECUTABLE" in arebuilder_env
     env_template = resources.files("arebuilder").joinpath(
         "templates", "aredev", "config", "arebuilder.env"
     )
@@ -210,6 +211,10 @@ def test_init_creates_expected_scaffold_without_resource_artifacts(
     assert "run_docker_session" in shell_launcher
     assert "prepare_docker_session" in shell_launcher
     assert "resolve_docker_runtime_paths" in shell_launcher
+    assert "ensure_docker_ready" in shell_launcher
+    assert "DOCKER_EXECUTABLE" in shell_launcher
+    assert "docker info" in shell_launcher
+    assert "nohup" in shell_launcher
     assert "run_bridge_loop" in shell_launcher
     assert "run_update_session" in shell_launcher
     assert "aredev-host-launcher.sh prepare <project-root>" in shell_launcher
@@ -276,6 +281,9 @@ def test_init_generates_windows_batch_wrapper_without_shell_wrapper(
     ]:
         assert command in powershell_launcher
     assert "Invoke-Prepare" in powershell_launcher
+    assert "Ensure-DockerReady" in powershell_launcher
+    assert "DOCKER_EXECUTABLE" in powershell_launcher
+    assert "Start-Process -FilePath $dockerStartPath" in powershell_launcher
     assert "Invoke-BridgeLoop" in powershell_launcher
     assert "Invoke-Update" in powershell_launcher
     assert 'ValidateSet("prepare", "bridge", "update")' in powershell_launcher
@@ -355,6 +363,7 @@ def test_init_cli_and_generated_templates_smoke(tmp_path: Path, monkeypatch) -> 
     )
     assert arebuilder_env["BUILDER_BACKEND"] == "docker"
     assert arebuilder_env["BUILD_TARGET"] == "demo"
+    assert "DOCKER_EXECUTABLE" in arebuilder_env
     compose_text = (project / "docker-compose.yml").read_text(encoding="utf-8")
     shell_wrapper = (project / "AREDev.sh").read_text(encoding="utf-8")
     shell_launcher = (project / "data" / "bin" / "aredev-host-launcher.sh").read_text(
@@ -367,6 +376,8 @@ def test_init_cli_and_generated_templates_smoke(tmp_path: Path, monkeypatch) -> 
     assert 'exec aredev --root "$AREDEV_ROOT"' in shell_wrapper
     assert "AREDEV_CONFIG_ROOT=/var/builder" in shell_launcher
     assert "AREDEV_HOST_LAUNCHER=1" in shell_launcher
+    assert "DOCKER_EXECUTABLE" in shell_launcher
+    assert "docker info" in shell_launcher
     assert '--project-directory "$AREDEV_ROOT"' in shell_launcher
     assert "prepare_docker_session" in shell_launcher
     assert "run_host_update" in shell_launcher

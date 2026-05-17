@@ -3,8 +3,9 @@ from arebuilder.config.module_settings import (
     SettingsError,
     parse_settings_text,
 )
-from arebuilder.config.nwn_paths import (
+from arebuilder.config.paths import (
     find_nwn_client_executable,
+    resolve_docker_executable,
     resolve_nwn_home_root,
     resolve_nwn_install_root,
 )
@@ -28,6 +29,7 @@ __all__ = [
     "RuntimePaths",
     "SettingsError",
     "parse_settings_text",
+    "resolve_docker_executable",
     "resolve_nwn_home_root",
     "resolve_nwn_install_root",
 ]

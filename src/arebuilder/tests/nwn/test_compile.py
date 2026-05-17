@@ -532,8 +532,8 @@ def test_script_index_reports_include_cycles(tmp_path: Path) -> None:
         script_compile.ScriptIndex(script_dir)
 
     message = str(exc_info.value)
-    assert message.startswith("Error: Include cycle detected: ")
-    cycle_path = message.removeprefix("Error: Include cycle detected: ").split(" -> ")
+    assert message.startswith("E: Include cycle detected: ")
+    cycle_path = message.removeprefix("E: Include cycle detected: ").split(" -> ")
     assert cycle_path[0] == cycle_path[-1]
     assert set(cycle_path) == {"inc_alpha.nss", "inc_beta.nss"}
 

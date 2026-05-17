@@ -298,7 +298,7 @@ class ScriptIndex:
             cycle_path = " -> ".join(
                 f"{script.name}.nss" for script in reversed(exc.args[1])
             )
-            raise CompileError(f"Error: Include cycle detected: {cycle_path}") from exc
+            raise CompileError(f"E: Include cycle detected: {cycle_path}") from exc
 
         for script in ordered_scripts:
             includes = set(direct_includes[script])
@@ -517,9 +517,9 @@ class StatefulScriptCompiler:
         script_index = self._require_index()
         script = script_index.get(script_name)
         if script is None or not script.primary:
-            raise CompileError(f"Error: Unable to find {script_name}.nss")
+            raise CompileError(f"E: Unable to find {script_name}.nss")
         if not script.contents:
-            raise CompileError(f"Error: {script_name}.nss is a base game script.")
+            raise CompileError(f"E: {script_name}.nss is a base game script.")
 
         if script.is_include or not script_index.is_compilable(script):
             print("Include file detected. Checking dependencies...", end="\n\n")
@@ -773,7 +773,7 @@ class StatefulScriptCompiler:
         if self.game_scripts.get("nwscript.nss") is not None:
             return
         raise CompileError(
-            "Error: Unable to find nwscript.nss in the NWN install data. "
+            "E: Unable to find nwscript.nss in the NWN install data. "
             "Set NWN_INSTALL_PATH to the host Neverwinter Nights install root "
             "and make sure it is mounted at /nwn/install in Dockerized AREDev."
         )
@@ -902,7 +902,7 @@ def write_hash_index(path: Path, hash_index: dict[str, int]) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(hash_index), encoding="utf-8")
     except OSError as exc:
-        raise CompileError(f"Error: Unable to store script hashes ({exc})") from exc
+        raise CompileError(f"E: Unable to store script hashes ({exc})") from exc
 
 
 def delete_hash_index(path: Path) -> None:

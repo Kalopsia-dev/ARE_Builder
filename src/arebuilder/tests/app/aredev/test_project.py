@@ -1,9 +1,9 @@
 from pathlib import Path
 
 from arebuilder.app.aredev.project import (
+    DEFAULT_AREBUILDER_REPO,
     BuilderConfig,
     BuilderConfigError,
-    DEFAULT_AREBUILDER_REPO,
     ProjectLayout,
     build_project_builder_settings,
     infer_project_paths,
@@ -27,6 +27,7 @@ def test_load_arebuilder_env_parses_defaults_and_overrides(tmp_path: Path) -> No
         AREBUILDER_REPO=https://example.invalid/ARE_Builder.git
         NWSERVER_IMAGE=custom/nwserver:dev
         NWN_INSTALL_PATH="{install_root}"
+        DOCKER_EXECUTABLE="{tmp_path / "start-docker"}"
         """,
         encoding="utf-8",
     )
@@ -39,6 +40,7 @@ def test_load_arebuilder_env_parses_defaults_and_overrides(tmp_path: Path) -> No
     assert config.arebuilder_repo == "https://example.invalid/ARE_Builder.git"
     assert config.nwserver_image == "custom/nwserver:dev"
     assert config.nwn_install_root == install_root
+    assert config.docker_executable_path == tmp_path / "start-docker"
 
 
 def test_render_arebuilder_env_populates_inferred_nwn_install_path(monkeypatch) -> None:
@@ -60,7 +62,58 @@ def test_render_arebuilder_env_populates_inferred_nwn_install_path(monkeypatch) 
     assert "NWN_HOME_PATH=/synthetic/nwn-home\n" in arebuilder_env
 
 
-def test_infer_project_paths_warns_when_nwn_paths_are_unknown(monkeypatch) -> None:
+def test_render_arebuilder_env_populates_detected_docker_starter(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """Verify generated env files include a detected Docker starter executable."""
+
+    starter = tmp_path / "docker-starter"
+    starter.write_text("", encoding="utf-8")
+    monkeypatch.setattr(
+        "arebuilder.app.aredev.project.resolve_nwn_install_root",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        "arebuilder.app.aredev.project.resolve_nwn_home_root",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        "arebuilder.app.aredev.project.resolve_docker_executable",
+        lambda **_kwargs: str(starter),
+    )
+
+    arebuilder_env = render_arebuilder_env()
+
+    assert f"DOCKER_EXECUTABLE={starter}\n" in arebuilder_env
+
+
+def test_render_arebuilder_env_leaves_docker_starter_empty_when_unknown(
+    monkeypatch,
+) -> None:
+    """Verify failed Docker starter autodetection leaves the env setting blank."""
+
+    monkeypatch.setattr(
+        "arebuilder.app.aredev.project.resolve_nwn_install_root",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        "arebuilder.app.aredev.project.resolve_nwn_home_root",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        "arebuilder.app.aredev.project.resolve_docker_executable",
+        lambda **_kwargs: "",
+    )
+
+    arebuilder_env = render_arebuilder_env()
+
+    assert "DOCKER_EXECUTABLE=\n" in arebuilder_env
+
+
+def test_infer_project_paths_warns_when_nwn_config_paths_are_unknown(
+    monkeypatch,
+) -> None:
     """Verify that infer project paths warns when NWN paths are unknown."""
 
     monkeypatch.setattr(

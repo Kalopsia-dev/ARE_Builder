@@ -10,7 +10,7 @@ from arebuilder.config.env import (
     parse_key_value_text,
     validate_build_target,
 )
-from arebuilder.config.nwn_paths import resolve_nwn_install_root
+from arebuilder.config.paths import resolve_nwn_install_root
 
 AREBUILDER_ENV_FILENAME = "arebuilder.env"
 

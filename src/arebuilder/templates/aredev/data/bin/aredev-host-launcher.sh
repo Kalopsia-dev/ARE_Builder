@@ -72,6 +72,7 @@ load_aredev_config() {
     # override for the NWN install/home paths.
     ENV_NWN_INSTALL_PATH=${NWN_INSTALL_PATH:-}
     ENV_NWN_HOME_PATH=${NWN_HOME_PATH:-}
+    ENV_DOCKER_EXECUTABLE=${DOCKER_EXECUTABLE:-}
 
     if [ -f "$CONFIG_FILE" ]; then
         # shellcheck source=/dev/null - generated config is a simple KEY=value file.
@@ -83,6 +84,7 @@ load_aredev_config() {
     NWN_INSTALL_PATH=${NWN_INSTALL_PATH:-$ENV_NWN_INSTALL_PATH}
     NWN_HOME_PATH=${NWN_HOME_PATH:-$ENV_NWN_HOME_PATH}
     NWN_HOME_PATH=${NWN_HOME_PATH:-$AREDEV_ROOT/server}
+    DOCKER_EXECUTABLE=${DOCKER_EXECUTABLE:-$ENV_DOCKER_EXECUTABLE}
 }
 
 resolve_aredev_path() {
@@ -103,6 +105,48 @@ resolve_aredev_path() {
     fi
 }
 
+ensure_docker_ready() {
+    # Probe Docker itself so this stays independent of the desktop app in use.
+    docker info >/dev/null 2>&1 && return 0
+    if [ -z "${DOCKER_EXECUTABLE:-}" ]; then
+        echo "Docker is not ready. Start Docker and try again, or set DOCKER_EXECUTABLE in config/arebuilder.env." >&2
+        return 1
+    fi
+
+    docker_executable=$DOCKER_EXECUTABLE
+    case "$docker_executable" in
+        "~") docker_executable=$HOME ;;
+        "~/"*) docker_executable=$HOME/${docker_executable#~/} ;;
+    esac
+    case "$docker_executable" in
+        /*) ;;
+        *) echo "E: Provided DOCKER_EXECUTABLE must be an absolute path: $docker_executable" >&2; return 1 ;;
+    esac
+    [ -f "$docker_executable" ] || {
+        echo "E: Provided DOCKER_EXECUTABLE does not exist: $docker_executable" >&2
+        return 1
+    }
+    [ -x "$docker_executable" ] || {
+        echo "E: Provided DOCKER_EXECUTABLE is not executable: $docker_executable" >&2
+        return 1
+    }
+
+    # Launch only the configured executable path; do not eval shell commands.
+    echo "Starting Docker..."
+    nohup "$docker_executable" >/dev/null 2>&1 &
+
+    timeout=10
+    elapsed=0
+    while [ "$elapsed" -lt "$timeout" ]; do
+        sleep 1
+        docker info >/dev/null 2>&1 && return 0
+        elapsed=$((elapsed + 1))
+    done
+
+    echo "Unable to start Docker. Please do so manually." >&2
+    return 1
+}
+
 clear_bridge_files() {
     mkdir -p "$COMMAND_DIR"
     # Remove stale requests before starting a new builder container so an older
@@ -120,8 +164,7 @@ resolve_docker_runtime_paths() {
         echo "Use the folder that contains the game's data/ and bin/ directories, such as data/nwn_base.key or bin/.../nwmain." >&2
         exit 1
     fi
-    if ! command -v docker >/dev/null 2>&1; then
-        echo "Unable to find Docker on PATH. Install Docker before using Dockerized AREDev." >&2
+    if ! ensure_docker_ready; then
         exit 1
     fi
 

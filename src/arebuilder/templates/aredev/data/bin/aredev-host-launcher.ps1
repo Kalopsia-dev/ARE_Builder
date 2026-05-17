@@ -111,6 +111,67 @@ function Resolve-AredevPath {
     return [System.IO.Path]::GetFullPath($expanded)
 }
 
+function Test-DockerReady {
+    # Probe Docker itself rather than guessing which desktop/service is active.
+    try {
+        & docker info *> $null
+        $status = if ($null -eq $global:LASTEXITCODE) { 0 } else { $global:LASTEXITCODE }
+        return $status -eq 0
+    }
+    catch {
+        return $false
+    }
+}
+
+function Ensure-DockerReady {
+    # Start only the configured executable path, then wait for docker info.
+    param([Parameter(Mandatory = $true)][hashtable]$Config)
+
+    if (Test-DockerReady) {
+        return
+    }
+
+    $dockerStartExecutable = $env:DOCKER_EXECUTABLE
+    if ($Config.ContainsKey("DOCKER_EXECUTABLE") -and $Config["DOCKER_EXECUTABLE"]) {
+        $dockerStartExecutable = $Config["DOCKER_EXECUTABLE"]
+    }
+    if (-not $dockerStartExecutable) {
+        throw "Docker is not ready. Start Docker and try again, or set DOCKER_EXECUTABLE in config\arebuilder.env."
+    }
+    # Keep Docker startup path-only: expand user markers but reject command text.
+    $dockerStartPath = $dockerStartExecutable
+    if ($dockerStartPath -eq "~") {
+        $dockerStartPath = [Environment]::GetFolderPath("UserProfile")
+    }
+    elseif ($dockerStartPath.StartsWith("~/") -or $dockerStartPath.StartsWith("~\")) {
+        $dockerStartPath = Join-Path ([Environment]::GetFolderPath("UserProfile")) $dockerStartPath.Substring(2)
+    }
+    if (-not [System.IO.Path]::IsPathRooted($dockerStartPath)) {
+        throw "E: Provided DOCKER_EXECUTABLE must be an absolute path: $dockerStartPath"
+    }
+    $dockerStartPath = [System.IO.Path]::GetFullPath($dockerStartPath)
+    if (-not (Test-Path -LiteralPath $dockerStartPath -PathType Leaf)) {
+        throw "E: Provided DOCKER_EXECUTABLE does not exist: $dockerStartPath"
+    }
+
+    $timeoutSeconds = 10.0
+
+    Write-Host "Starting Docker..."
+    Start-Process -FilePath $dockerStartPath | Out-Null
+
+    $deadline = [DateTime]::UtcNow.AddSeconds($timeoutSeconds)
+    while ([DateTime]::UtcNow -lt $deadline) {
+        if (Test-DockerReady) {
+            return
+        }
+        Start-Sleep -Milliseconds 250
+    }
+    if (Test-DockerReady) {
+        return
+    }
+    throw "Unable to start Docker. Please do so manually."
+}
+
 function Clear-BridgeFiles {
     # Remove stale bridge files before a new builder container starts. Otherwise
     # a request or response from a crashed prior session could be mistaken for a
@@ -170,10 +231,7 @@ function Resolve-DockerRuntimePaths {
         [Console]::Error.WriteLine("NWN_INSTALL_PATH is required for Dockerized AREDev.`nSet it in config\arebuilder.env or set it in the environment before starting AREDev.`nIt should point to your host Neverwinter Nights install folder, not the AREDev project.`nUse the folder that contains the game's data and bin directories, such as data\nwn_base.key or bin\win32\nwmain.exe.")
         exit 1
     }
-    if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
-        [Console]::Error.WriteLine("Unable to find Docker on PATH. Install Docker Desktop or add Docker to PATH before using Dockerized AREDev.")
-        exit 1
-    }
+    Ensure-DockerReady -Config $config
 
     $script:NwnInstallRootPath = Resolve-AredevPath $nwnInstallPath
     $nwnHomeRoot = Resolve-AredevPath $nwnHomePath
@@ -204,6 +262,7 @@ function Invoke-Update {
     # AREDev.bat invokes this after the bridge accepts an update_restart request.
     $resolvedRoot = Resolve-ProjectRoot $ProjectRoot
     Set-ProjectPaths $resolvedRoot
+    Ensure-DockerReady -Config (Read-AredevConfig)
     try {
         $status = Invoke-HostUpdate
     }
