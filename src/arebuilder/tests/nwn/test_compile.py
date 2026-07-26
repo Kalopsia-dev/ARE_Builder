@@ -102,6 +102,29 @@ def test_game_script_source_cache_does_not_retain_unused_source(
     assert source_ref() is None
 
 
+def test_game_script_sources_preserves_empty_payload_from_first_matching_source(
+    tmp_path: Path,
+) -> None:
+    """Verify an empty script remains a present result and preserves source precedence."""
+
+    first_dir = tmp_path / "first"
+    fallback_dir = tmp_path / "fallback"
+    first_dir.mkdir()
+    fallback_dir.mkdir()
+    (first_dir / "empty.nss").write_bytes(b"")
+    (fallback_dir / "empty.nss").write_bytes(b"fallback")
+    sources = script_compile.GameScriptSources(None)
+    sources.sources = [
+        script_compile.GameScriptSource(first_dir),
+        script_compile.GameScriptSource(fallback_dir),
+    ]
+
+    try:
+        assert sources.get("empty.nss") == b""
+    finally:
+        sources.close()
+
+
 def test_compile_closes_game_script_key_reader(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

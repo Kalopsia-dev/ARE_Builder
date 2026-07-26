@@ -411,7 +411,7 @@ class GameScriptSources:
         """Return a matching script payload or ``None`` when it is unavailable."""
 
         for source in self.sources:
-            if script := source.get(script_name):
+            if (script := source.get(script_name)) is not None:
                 return script
         return None
 
