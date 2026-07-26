@@ -1,5 +1,8 @@
+import gc
 import json
 import os
+import weakref
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -79,6 +82,96 @@ def test_game_script_source_accepts_key_reader_filenames_property(
 
     assert source.scripts == {"nwscript.nss", "x0_i0_match.nss"}
     assert source.get("nwscript.nss") == b"source:nwscript.nss"
+
+
+def test_game_script_source_cache_does_not_retain_unused_source(
+    tmp_path: Path,
+) -> None:
+    """Verify cached script bytes do not retain their owning source indefinitely."""
+
+    script_dir = tmp_path / "scripts"
+    script_dir.mkdir()
+    _write_script(script_dir / "nwscript.nss", "void main() {}")
+    source = script_compile.GameScriptSource(script_dir)
+    assert source.get("nwscript.nss") == b"void main() {}\n"
+    source_ref = weakref.ref(source)
+
+    del source
+    gc.collect()
+
+    assert source_ref() is None
+
+
+def test_compile_closes_game_script_key_reader(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verify a completed compile releases key-file resources deterministically."""
+
+    class TrackingKeyReader:
+        """Open a real handle while exposing the subset of the key-reader API used here."""
+
+        instances: list["TrackingKeyReader"] = []
+
+        def __init__(self, path: str) -> None:
+            self.handle = Path(path).open("rb")
+            self.instances.append(self)
+
+        @property
+        def filenames(self) -> list[str]:
+            return ["nwscript.nss"]
+
+        def read_file(self, script_name: str) -> bytes:
+            return f"source:{script_name}".encode("ascii")
+
+        def close(self) -> None:
+            self.handle.close()
+
+    class FailingCompiler:
+        """Raise during compilation to exercise reader cleanup on errors."""
+
+        def compile(self, _script_name: str) -> bytes:
+            raise RuntimeError("synthetic compiler failure")
+
+    def failing_compiler_factory(
+        _resolver: Callable[[str], bytes | None],
+    ) -> FailingCompiler:
+        return FailingCompiler()
+
+    monkeypatch.setattr(script_compile, "KeyReader", TrackingKeyReader)
+    nwn_root = tmp_path / "nwn"
+    data_dir = nwn_root / "data"
+    script_dir = tmp_path / "scripts"
+    output_dir = tmp_path / "compiled"
+    data_dir.mkdir(parents=True)
+    script_dir.mkdir()
+    output_dir.mkdir()
+    (data_dir / "nwn_base.key").write_bytes(b"synthetic key placeholder")
+    _write_script(script_dir / "main_one.nss", "void main() {}")
+
+    try:
+        compile_scripts(
+            script_dir=script_dir,
+            output_dir=output_dir,
+            selector="all",
+            nwn_root=nwn_root,
+            use_state=False,
+            compiler_factory=fake_compiler_factory,
+        )
+        with pytest.raises(CompileError):
+            compile_scripts(
+                script_dir=script_dir,
+                output_dir=output_dir,
+                selector="all",
+                nwn_root=nwn_root,
+                use_state=False,
+                compiler_factory=failing_compiler_factory,
+            )
+
+        assert len(TrackingKeyReader.instances) == 2
+        assert all(reader.handle.closed for reader in TrackingKeyReader.instances)
+    finally:
+        for reader in TrackingKeyReader.instances:
+            reader.close()
 
 
 def test_modified_compile_initialises_state_then_noops_when_unchanged(

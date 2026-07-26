@@ -345,6 +345,7 @@ class GameScriptSource:
         self.path = path
         self.reader: KeyReader | None = None
         self.scripts: set[str] = set()
+        self._cache: dict[str, bytes | None] = {}
 
         if path.is_dir():
             # Tests and loose installs can provide base scripts as plain files.
@@ -363,17 +364,29 @@ class GameScriptSource:
 
         return script_name in self.scripts
 
-    @lru_cache(maxsize=None)
     def get(self, script_name: str) -> bytes | None:
         """Return a matching script payload or ``None`` when it is unavailable."""
 
-        if script_name not in self:
-            return None
-        if self.reader is not None:
-            with self.lock:
-                return self.reader.read_file(script_name)
         with self.lock:
-            return (self.path / script_name).read_bytes()
+            if script_name in self._cache:
+                return self._cache[script_name]
+            if script_name not in self:
+                contents = None
+            elif self.reader is not None:
+                contents = self.reader.read_file(script_name)
+            else:
+                contents = (self.path / script_name).read_bytes()
+            self._cache[script_name] = contents
+            return contents
+
+    def close(self) -> None:
+        """Release archive handles and cached script data owned by this source."""
+
+        with self.lock:
+            if self.reader is not None:
+                self.reader.close()
+                self.reader = None
+            self._cache.clear()
 
 
 class GameScriptSources:
@@ -401,6 +414,13 @@ class GameScriptSources:
             if script := source.get(script_name):
                 return script
         return None
+
+    def close(self) -> None:
+        """Release every game-script source owned by this collection."""
+
+        for source in self.sources:
+            source.close()
+        self.sources.clear()
 
 
 def _key_reader_filenames(reader: KeyReader) -> list[str]:
@@ -493,23 +513,36 @@ class StatefulScriptCompiler:
     def run(self) -> CompileResult:
         """Run the configured compiler mode, creating state first when smart compile needs it."""
 
-        self._validate_game_script_sources()
-        selector = self.selector
-        if self.use_state and selector not in {"all", "*"} and not self._has_state():
-            print("All scripts will be compiled to initialise the index.", end="\n\n")
-            selector = "all"
+        try:
+            self._validate_game_script_sources()
+            selector = self.selector
+            if (
+                self.use_state
+                and selector not in {"all", "*"}
+                and not self._has_state()
+            ):
+                print(
+                    "All scripts will be compiled to initialise the index.",
+                    end="\n\n",
+                )
+                selector = "all"
 
-        self.script_index = ScriptIndex(self.script_dir, include_dirs=self.include_dirs)
+            self.script_index = ScriptIndex(
+                self.script_dir,
+                include_dirs=self.include_dirs,
+            )
 
-        if selector is None:
-            return self.compile_modified()
+            if selector is None:
+                return self.compile_modified()
 
-        param = ScriptIndex.normalise_script_name(selector)
-        if param == "all":
-            return self.compile_all()
-        if param.endswith("*"):
-            return self.compile_wildcard(param)
-        return self.compile_script(param)
+            param = ScriptIndex.normalise_script_name(selector)
+            if param == "all":
+                return self.compile_all()
+            if param.endswith("*"):
+                return self.compile_wildcard(param)
+            return self.compile_script(param)
+        finally:
+            self.game_scripts.close()
 
     def compile_script(self, script_name: str) -> CompileResult:
         """Compile one named primary script and refresh state hashes."""
