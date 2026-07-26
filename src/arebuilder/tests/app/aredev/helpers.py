@@ -22,8 +22,9 @@ DM_PASSWORD = "dummy-dm-password"
 class FakeRunner:
     """Subprocess runner test double that records calls for assertions."""
 
-    def __init__(self, *, running: str = ""):
+    def __init__(self, *, running: str = "", docker_info: list[int] | None = None):
         self.running = running
+        self.docker_info = list(docker_info or [0])
         self.calls: list[list[str]] = []
         self.cwd: list[Path] = []
         self.envs: list[dict[str, str]] = []
@@ -34,6 +35,13 @@ class FakeRunner:
         self.cwd.append(Path(cwd))
         self.envs.append(dict(env or {}))
         self.detached.append(detach)
+        if list(args) == ["docker", "info"]:
+            if len(self.docker_info) > 1:
+                status = self.docker_info.pop(0)
+            else:
+                status = self.docker_info[0]
+            stderr = "Docker is not ready." if status else ""
+            return ProcessResult(status, stderr=stderr)
         if list(args[:3]) == ["docker", "ps", "--format"]:
             return ProcessResult(0, stdout=self.running)
         if list(args[:4]) == ["docker", "volume", "ls", "--format"]:

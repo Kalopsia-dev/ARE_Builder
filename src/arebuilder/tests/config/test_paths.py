@@ -1,6 +1,7 @@
 from pathlib import Path
 
-from arebuilder.config.nwn_paths import (
+from arebuilder.config.paths import (
+    _docker_executable_candidates,
     find_nwn_client_executable,
     resolve_nwn_home_root,
     resolve_nwn_install_root,
@@ -84,3 +85,25 @@ def test_find_nwn_client_executable_supports_os_variants(tmp_path: Path) -> None
     )
     assert find_nwn_client_executable(install, system="Darwin") == macos
     assert find_nwn_client_executable(install, system="Windows") == win32
+
+
+def test_docker_executable_candidates_cover_orbstack_and_linux_rootless() -> None:
+    """Verify Docker starter autodetection includes non-Docker-Desktop starters."""
+
+    macos_candidates = [
+        path.as_posix()
+        for path in _docker_executable_candidates(
+            system="Darwin",
+            environ={},
+        )
+    ]
+    linux_candidates = [
+        path.as_posix()
+        for path in _docker_executable_candidates(
+            system="Linux",
+            environ={},
+        )
+    ]
+
+    assert "/Applications/OrbStack.app/Contents/MacOS/bin/orb" in macos_candidates
+    assert "/usr/bin/dockerd-rootless.sh" in linux_candidates

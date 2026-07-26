@@ -50,6 +50,11 @@ def test_end_to_end_build_and_link(tmp_path: Path, monkeypatch) -> None:
     assert {path.name for path in fixture.build_dir.iterdir()} == expected_files
     assert compile_calls[0]["script_dir"] == fixture.module_resources_dir / "scripts"
     assert compile_calls[0]["include_dirs"] == [fixture.are_resources_dir / "scripts"]
+    assert compile_calls[0]["selector"] is None
+    assert compile_calls[0]["state_path"] == (
+        fixture.root / "temp" / "script_index_synthetic.json"
+    )
+    assert compile_calls[0]["use_state"] is True
 
     archive_members = read_erf_members(fixture.module_archive_path)
     assert sorted(archive_members) == [

@@ -64,6 +64,7 @@ def initialize_aredev_project(
             builder_backend=backend,
             nwn_install_path=inferred_paths.nwn_install_path,
             nwn_home_path=inferred_paths.nwn_home_path,
+            docker_executable=inferred_paths.docker_executable,
         )
     except BuilderConfigError:
         raise

@@ -10,7 +10,7 @@ from arebuilder.config.env import (
     parse_key_value_text,
     validate_build_target,
 )
-from arebuilder.config.nwn_paths import resolve_nwn_install_root
+from arebuilder.config.paths import resolve_nwn_install_root
 
 AREBUILDER_ENV_FILENAME = "arebuilder.env"
 
@@ -114,6 +114,13 @@ class RuntimePaths:
         """Return the script directory for a target module."""
 
         return self.module_source_root(module) / "scripts"
+
+    def target_state_file(self, module: BuildModule) -> Path:
+        """Return the state file used for target-local script compilation."""
+
+        source_name = self.module_source_root(module).name
+        build_target = source_name.removesuffix("-resources")
+        return self.state_file.parent / f"script_index_{build_target}.json"
 
     def target_include_dirs(self) -> list[Path]:
         """Return shared include directories used by target script compilation."""

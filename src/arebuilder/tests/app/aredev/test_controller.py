@@ -6,7 +6,6 @@ import pytest
 from arebuilder.app.aredev import AREDevController
 from arebuilder.app.aredev.project import ProjectLayout, load_arebuilder_env
 from arebuilder.app.aredev.scaffold import initialize_aredev_project
-
 from arebuilder.tests.app.aredev.helpers import (
     FAKE_HOST_NWN_HOME_ROOT,
     FAKE_HOST_ROOT,
@@ -15,6 +14,24 @@ from arebuilder.tests.app.aredev.helpers import (
     make_controller,
     write_nwn_passwords,
 )
+
+
+def _create_executable(path: Path) -> Path:
+    """Create a fake executable file for Docker startup tests."""
+
+    path.write_text("#!/bin/sh\n", encoding="utf-8")
+    path.chmod(0o755)
+    return path
+
+
+def _append_arebuilder_env(layout: ProjectLayout, *lines: str) -> None:
+    """Append config lines to one generated AREDev env file."""
+
+    layout.arebuilder_env_path.write_text(
+        layout.arebuilder_env_path.read_text(encoding="utf-8")
+        + "".join(f"{line}\n" for line in lines),
+        encoding="utf-8",
+    )
 
 
 def test_build_runs_native_builder(tmp_path: Path) -> None:
@@ -132,6 +149,134 @@ def test_start_links_then_starts_server_with_module_env(
     ] in runner.calls
     assert runner.envs[-1]["NWN_MODULE"] == "are-dev-pgcc"
     assert runner.envs[-1]["NWN_HOME_PATH"] == str(nwn_home)
+
+
+def test_start_does_not_launch_configured_docker_executable_when_ready(
+    tmp_path: Path,
+) -> None:
+    """Verify Docker startup is skipped when the Docker engine is already ready."""
+
+    runner = FakeRunner(docker_info=[0, 0])
+    controller, layout, build_calls, runner = make_controller(tmp_path, runner=runner)
+    starter = _create_executable(tmp_path / "start-docker")
+    _append_arebuilder_env(layout, f"DOCKER_EXECUTABLE={starter}")
+    controller.config = load_arebuilder_env(layout.root)
+
+    assert controller.run("start", []) == 0
+
+    assert build_calls == [("link", ["are-dev-pgcc"], False)]
+    assert [str(starter)] not in runner.calls
+    assert runner.calls[0] == ["docker", "info"]
+
+
+def test_start_launches_configured_docker_executable_until_ready(
+    tmp_path: Path,
+) -> None:
+    """Verify start launches the configured Docker starter and waits for readiness."""
+
+    output: list[str] = []
+    runner = FakeRunner(docker_info=[1, 0, 0])
+    controller, layout, build_calls, runner = make_controller(
+        tmp_path,
+        runner=runner,
+        output=output.append,
+    )
+    starter = _create_executable(tmp_path / "start-docker")
+    _append_arebuilder_env(layout, f"DOCKER_EXECUTABLE={starter}")
+    controller.config = load_arebuilder_env(layout.root)
+
+    assert controller.run("start", []) == 0
+
+    assert [str(starter)] in runner.calls
+    assert runner.detached[runner.calls.index([str(starter)])] is True
+    assert "Starting Docker..." in output
+    assert build_calls == [("link", ["are-dev-pgcc"], False)]
+
+
+def test_start_reports_timeout_when_docker_never_becomes_ready(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify Docker startup timeout stops before build/link work begins."""
+
+    monkeypatch.setattr(
+        "arebuilder.app.aredev.controller.DOCKER_START_TIMEOUT",
+        0.0,
+    )
+    output: list[str] = []
+    runner = FakeRunner(docker_info=[1])
+    controller, layout, build_calls, runner = make_controller(
+        tmp_path,
+        runner=runner,
+        output=output.append,
+    )
+    starter = _create_executable(tmp_path / "start-docker")
+    _append_arebuilder_env(layout, f"DOCKER_EXECUTABLE={starter}")
+    controller.config = load_arebuilder_env(layout.root)
+
+    assert controller.run("start", []) == 1
+
+    assert [str(starter)] in runner.calls
+    assert build_calls == []
+    assert "Unable to start Docker. Please do so manually." in output
+
+
+def test_start_requires_configured_docker_executable_when_not_ready(
+    tmp_path: Path,
+) -> None:
+    """Verify Docker startup reports a clear message when no starter is configured."""
+
+    output: list[str] = []
+    runner = FakeRunner(docker_info=[1])
+    controller, _, build_calls, runner = make_controller(
+        tmp_path,
+        runner=runner,
+        output=output.append,
+    )
+    _append_arebuilder_env(controller.layout, "DOCKER_EXECUTABLE=")
+    controller.config = load_arebuilder_env(controller.layout.root)
+
+    assert controller.run("start", []) == 1
+
+    assert build_calls == []
+    assert all(call[:2] != ["docker", "compose"] for call in runner.calls)
+    assert any("DOCKER_EXECUTABLE" in line for line in output)
+
+
+def test_start_rejects_invalid_docker_executable(tmp_path: Path) -> None:
+    """Verify configured Docker starter paths must exist before launch."""
+
+    output: list[str] = []
+    runner = FakeRunner(docker_info=[1])
+    controller, layout, build_calls, runner = make_controller(
+        tmp_path,
+        runner=runner,
+        output=output.append,
+    )
+    missing = tmp_path / "missing-start-docker"
+    _append_arebuilder_env(layout, f"DOCKER_EXECUTABLE={missing}")
+    controller.config = load_arebuilder_env(layout.root)
+
+    assert controller.run("start", []) == 1
+
+    assert [str(missing)] not in runner.calls
+    assert build_calls == []
+    assert any("does not exist" in line for line in output)
+
+
+def test_passive_container_status_probe_does_not_start_docker(tmp_path: Path) -> None:
+    """Verify prompt-style Docker probes do not launch the configured starter."""
+
+    runner = FakeRunner(docker_info=[1])
+    controller, layout, _, runner = make_controller(tmp_path, runner=runner)
+    starter = _create_executable(tmp_path / "start-docker")
+    _append_arebuilder_env(layout, f"DOCKER_EXECUTABLE={starter}")
+    controller.config = load_arebuilder_env(layout.root)
+
+    assert controller._is_server_running() is False
+
+    assert [str(starter)] not in runner.calls
+    assert ["docker", "info"] not in runner.calls
 
 
 def test_docker_backend_runs_builder_through_compose(tmp_path: Path) -> None:
@@ -327,10 +472,8 @@ def test_nwn_launches_client_from_detected_install_variant(
 ) -> None:
     """Verify NWN launch uses the detected platform install variant."""
 
-    monkeypatch.setattr("arebuilder.config.nwn_paths.platform.system", lambda: "Linux")
-    monkeypatch.setattr(
-        "arebuilder.config.nwn_paths.platform.machine", lambda: "x86_64"
-    )
+    monkeypatch.setattr("arebuilder.config.paths.platform.system", lambda: "Linux")
+    monkeypatch.setattr("arebuilder.config.paths.platform.machine", lambda: "x86_64")
     runner = FakeRunner(running="aredevnwserver\n")
     project = tmp_path / "AREDev"
     initialize_aredev_project(project)

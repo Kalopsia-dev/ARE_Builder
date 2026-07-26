@@ -30,6 +30,7 @@ from arebuilder.app.arebuilder.engine import (
     _print_area_dependency_warnings,
 )
 from arebuilder.app.aredev.host_bridge import (
+    COMPOSE_STOP_TIMEOUT_SECONDS,
     HOST_COMMAND_DIR,
     HOST_DOCKER_TIMEOUT_SECONDS,
     HOST_LAUNCH_TIMEOUT_SECONDS,
@@ -55,7 +56,7 @@ from arebuilder.builder.symlinks import (
     apply_symlink_plan,
     count_symlink_plan_steps,
 )
-from arebuilder.config.nwn_paths import find_nwn_client_executable
+from arebuilder.config.paths import find_nwn_client_executable
 from arebuilder.config.runtime import BuildModule
 
 COMPOSE_ARGS = ["docker", "compose", "--progress", "quiet"]
@@ -63,6 +64,8 @@ AREDEV_PROJECT = "aredev"
 SCREEN_CLEAR = "\033[H\033[2J\033[3J"
 HOST_MODULES_ENV = "AREDEV_NWN_HOME_MODULES_ROOT"
 AREDEV_RESTART_EXIT_CODE = 75
+DOCKER_START_POLL_SECONDS = 0.25
+DOCKER_START_TIMEOUT = 10.0
 UPDATE_LOCK_WAIT_SECONDS_ENV = "AREDEV_UPDATE_LOCK_WAIT_SECONDS"
 UPDATE_LOCK_DEFAULT_WAIT_SECONDS = 1800.0
 UPDATE_LOCK_POLL_SECONDS = 2.0
@@ -502,6 +505,8 @@ class AREDevController:
     def _update_containers(self) -> int:
         """Pull Docker images for the AREDev server stack."""
 
+        if not self._ensure_docker_ready():
+            return 1
         if self._is_server_running():
             result = self._run_compose(["down"])
             if result.returncode != 0:
@@ -576,6 +581,8 @@ class AREDevController:
 
         if not self._ensure_host_bridge():
             return 1
+        if not self._ensure_docker_ready():
+            return 1
         if not self._validate_target_resources():
             return 1
         if not self._prepare_runtime_environment():
@@ -611,7 +618,9 @@ class AREDevController:
             return 0
 
         self.output("Stopping server...")
-        result = self._run_compose(["down"])
+        result = self._run_compose(
+            ["down", "--timeout", str(COMPOSE_STOP_TIMEOUT_SECONDS)]
+        )
         if result.returncode != 0:
             return self._report_process_failure(result)
         self.output("Cleaning development folder...")
@@ -962,6 +971,8 @@ class AREDevController:
         if _in_builder_container():
             return self.host_bridge.compose(args, extra_env=extra_env)
 
+        if not self._ensure_docker_ready():
+            return ProcessResult(1)
         return self.process_runner(
             [
                 *COMPOSE_ARGS,
@@ -1580,6 +1591,87 @@ class AREDevController:
         self.output(host_bridge_error())
         return False
 
+    def _ensure_docker_ready(self) -> bool:
+        """Start the configured Docker engine executable when Docker is unavailable."""
+
+        if _in_builder_container():
+            return True
+
+        if self._docker_info().returncode == 0:
+            return True
+
+        executable = self.config.docker_executable_path
+        if executable is None:
+            self.output(
+                "Docker is not ready. Start Docker and try again, or set "
+                "DOCKER_EXECUTABLE in config/arebuilder.env."
+            )
+            return False
+
+        if not self._validate_docker_executable(executable):
+            return False
+
+        self.output("Starting Docker...")
+        try:
+            launch_result = self.process_runner(
+                [str(executable)],
+                cwd=self.layout.root,
+                env=os.environ.copy(),
+                capture_output=False,
+                background=True,
+                detach=True,
+            )
+        except OSError as exc:
+            self.output(f"Unable to start Docker: {exc}")
+            return False
+        if launch_result.returncode != 0:
+            self._report_process_failure(launch_result)
+            return False
+
+        deadline = time.monotonic() + DOCKER_START_TIMEOUT
+        while True:
+            if self._docker_info().returncode == 0:
+                return True
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            time.sleep(min(DOCKER_START_POLL_SECONDS, remaining))
+
+        self.output("Unable to start Docker. Please do so manually.")
+        return False
+
+    def _docker_info(self) -> ProcessResult:
+        """Probe Docker engine readiness without triggering configured startup."""
+
+        try:
+            return self.process_runner(
+                ["docker", "info"],
+                cwd=self.layout.root,
+                env=os.environ.copy(),
+                capture_output=True,
+                background=False,
+            )
+        except OSError as exc:
+            return ProcessResult(1, stderr=str(exc))
+
+    def _validate_docker_executable(self, executable: Path) -> bool:
+        """Return whether the configured Docker starter can be launched safely."""
+
+        checks = (
+            (not executable.is_absolute(), "must be an absolute path"),
+            (not executable.exists(), "does not exist"),
+            (not executable.is_file(), "is not a file"),
+            (
+                os.name != "nt" and not os.access(executable, os.X_OK),
+                "is not executable",
+            ),
+        )
+        for failed, message in checks:
+            if failed:
+                self.output(f"E: Provided DOCKER_EXECUTABLE {message}: {executable}")
+                return False
+        return True
+
     def _handle_update_lock(self, command: str | None) -> int | None:
         """Wait for an in-progress host update before dispatching container commands."""
 
@@ -1637,14 +1729,14 @@ class AREDevController:
         self._path_warnings_shown = True
         if self.config.nwn_install_root is None:
             self.output(
-                "Warning: Unable to infer NWN_INSTALL_PATH. "
+                "W: Unable to infer NWN_INSTALL_PATH. "
                 f"{NWN_INSTALL_PATH_DESCRIPTION} Set it in "
                 "config/arebuilder.env before compiling scripts or using "
                 "Dockerized AREDev."
             )
         if self.config.nwn_home_root is None:
             self.output(
-                "Warning: Unable to infer NWN_HOME_PATH. "
+                "W: Unable to infer NWN_HOME_PATH. "
                 f"{NWN_HOME_PATH_DESCRIPTION} Set it in "
                 "config/arebuilder.env if you want generated HAK and TLK "
                 "content linked into the game client."

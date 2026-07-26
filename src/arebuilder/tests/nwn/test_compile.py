@@ -1,5 +1,8 @@
+import gc
 import json
 import os
+import weakref
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -81,6 +84,119 @@ def test_game_script_source_accepts_key_reader_filenames_property(
     assert source.get("nwscript.nss") == b"source:nwscript.nss"
 
 
+def test_game_script_source_cache_does_not_retain_unused_source(
+    tmp_path: Path,
+) -> None:
+    """Verify cached script bytes do not retain their owning source indefinitely."""
+
+    script_dir = tmp_path / "scripts"
+    script_dir.mkdir()
+    _write_script(script_dir / "nwscript.nss", "void main() {}")
+    source = script_compile.GameScriptSource(script_dir)
+    assert source.get("nwscript.nss") == b"void main() {}\n"
+    source_ref = weakref.ref(source)
+
+    del source
+    gc.collect()
+
+    assert source_ref() is None
+
+
+def test_game_script_sources_preserves_empty_payload_from_first_matching_source(
+    tmp_path: Path,
+) -> None:
+    """Verify an empty script remains a present result and preserves source precedence."""
+
+    first_dir = tmp_path / "first"
+    fallback_dir = tmp_path / "fallback"
+    first_dir.mkdir()
+    fallback_dir.mkdir()
+    (first_dir / "empty.nss").write_bytes(b"")
+    (fallback_dir / "empty.nss").write_bytes(b"fallback")
+    sources = script_compile.GameScriptSources(None)
+    sources.sources = [
+        script_compile.GameScriptSource(first_dir),
+        script_compile.GameScriptSource(fallback_dir),
+    ]
+
+    try:
+        assert sources.get("empty.nss") == b""
+    finally:
+        sources.close()
+
+
+def test_compile_closes_game_script_key_reader(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verify a completed compile releases key-file resources deterministically."""
+
+    class TrackingKeyReader:
+        """Open a real handle while exposing the subset of the key-reader API used here."""
+
+        instances: list["TrackingKeyReader"] = []
+
+        def __init__(self, path: str) -> None:
+            self.handle = Path(path).open("rb")
+            self.instances.append(self)
+
+        @property
+        def filenames(self) -> list[str]:
+            return ["nwscript.nss"]
+
+        def read_file(self, script_name: str) -> bytes:
+            return f"source:{script_name}".encode("ascii")
+
+        def close(self) -> None:
+            self.handle.close()
+
+    class FailingCompiler:
+        """Raise during compilation to exercise reader cleanup on errors."""
+
+        def compile(self, _script_name: str) -> bytes:
+            raise RuntimeError("synthetic compiler failure")
+
+    def failing_compiler_factory(
+        _resolver: Callable[[str], bytes | None],
+    ) -> FailingCompiler:
+        return FailingCompiler()
+
+    monkeypatch.setattr(script_compile, "KeyReader", TrackingKeyReader)
+    nwn_root = tmp_path / "nwn"
+    data_dir = nwn_root / "data"
+    script_dir = tmp_path / "scripts"
+    output_dir = tmp_path / "compiled"
+    data_dir.mkdir(parents=True)
+    script_dir.mkdir()
+    output_dir.mkdir()
+    (data_dir / "nwn_base.key").write_bytes(b"synthetic key placeholder")
+    _write_script(script_dir / "main_one.nss", "void main() {}")
+
+    try:
+        compile_scripts(
+            script_dir=script_dir,
+            output_dir=output_dir,
+            selector="all",
+            nwn_root=nwn_root,
+            use_state=False,
+            compiler_factory=fake_compiler_factory,
+        )
+        with pytest.raises(CompileError):
+            compile_scripts(
+                script_dir=script_dir,
+                output_dir=output_dir,
+                selector="all",
+                nwn_root=nwn_root,
+                use_state=False,
+                compiler_factory=failing_compiler_factory,
+            )
+
+        assert len(TrackingKeyReader.instances) == 2
+        assert all(reader.handle.closed for reader in TrackingKeyReader.instances)
+    finally:
+        for reader in TrackingKeyReader.instances:
+            reader.close()
+
+
 def test_modified_compile_initialises_state_then_noops_when_unchanged(
     tmp_path: Path,
 ) -> None:
@@ -124,6 +240,49 @@ def test_modified_compile_initialises_state_then_noops_when_unchanged(
     )
 
     assert result.compiled_count == 0
+
+
+def test_modified_compile_ignores_missing_secondary_output(tmp_path: Path) -> None:
+    """Verify an empty live mirror does not make unchanged scripts look modified."""
+
+    script_dir = tmp_path / "scripts"
+    output_dir = tmp_path / "compiled"
+    live_output_dir = tmp_path / "development"
+    state_path = tmp_path / "temp" / "script_index.json"
+    script_dir.mkdir()
+    output_dir.mkdir()
+    live_output_dir.mkdir()
+    _write_script(script_dir / "main_one.nss", "void main() {}")
+
+    compile_scripts(
+        script_dir=script_dir,
+        output_dir=output_dir,
+        state_path=state_path,
+        compiler_factory=fake_compiler_factory,
+    )
+
+    result = compile_scripts(
+        script_dir=script_dir,
+        output_dir=output_dir,
+        secondary_output_dir=live_output_dir,
+        state_path=state_path,
+        compiler_factory=fake_compiler_factory,
+    )
+
+    assert result.compiled_count == 0
+
+    _write_script(script_dir / "main_one.nss", "void main() { int changed = 1; }")
+    result = compile_scripts(
+        script_dir=script_dir,
+        output_dir=output_dir,
+        secondary_output_dir=live_output_dir,
+        state_path=state_path,
+        compiler_factory=fake_compiler_factory,
+    )
+
+    assert result.compiled_count == 1
+    assert (output_dir / "main_one.ncs").read_bytes() == b"compiled:main_one"
+    assert (live_output_dir / "main_one.ncs").read_bytes() == b"compiled:main_one"
 
 
 def test_include_change_compiles_dependent_primary_scripts(tmp_path: Path) -> None:
@@ -307,6 +466,60 @@ def test_target_compile_uses_shared_includes_but_writes_only_primary_outputs(
     assert {path.name for path in output_dir.glob("*.ncs")} == {"target_main.ncs"}
 
 
+def test_stateful_target_compile_tracks_shared_include_changes(
+    tmp_path: Path,
+) -> None:
+    """Verify stateful target compiles rebuild dependents of shared includes."""
+
+    script_dir = tmp_path / "target" / "scripts"
+    shared_dir = tmp_path / "are-resources" / "scripts"
+    output_dir = tmp_path / "compiled" / "target"
+    state_path = tmp_path / "temp" / "script_index_pgcc.json"
+    script_dir.mkdir(parents=True)
+    shared_dir.mkdir(parents=True)
+    output_dir.mkdir(parents=True)
+    _write_script(shared_dir / "inc_shared.nss", "int helper() { return 1; }")
+    _write_script(
+        script_dir / "target_main.nss",
+        '#include "inc_shared"\nvoid main() { int x = helper(); }',
+    )
+
+    first_result = compile_scripts(
+        script_dir=script_dir,
+        output_dir=output_dir,
+        state_path=state_path,
+        include_dirs=[shared_dir],
+        clear_output_on_all=False,
+        compiler_factory=fake_compiler_factory,
+    )
+    second_result = compile_scripts(
+        script_dir=script_dir,
+        output_dir=output_dir,
+        state_path=state_path,
+        include_dirs=[shared_dir],
+        clear_output_on_all=False,
+        compiler_factory=fake_compiler_factory,
+    )
+    _write_script(shared_dir / "inc_shared.nss", "int helper() { return 2; }")
+    changed_include_result = compile_scripts(
+        script_dir=script_dir,
+        output_dir=output_dir,
+        state_path=state_path,
+        include_dirs=[shared_dir],
+        clear_output_on_all=False,
+        compiler_factory=fake_compiler_factory,
+    )
+
+    assert first_result.compiled_count == 1
+    assert second_result.compiled_count == 0
+    assert changed_include_result.compiled_count == 1
+    assert {path.name for path in output_dir.glob("*.ncs")} == {"target_main.ncs"}
+    assert json.loads(state_path.read_text(encoding="utf-8")).keys() == {
+        "inc_shared",
+        "target_main",
+    }
+
+
 @pytest.mark.skipif(
     os.name == "nt",
     reason="Creating symlinks on Windows can require elevated privileges.",
@@ -478,8 +691,8 @@ def test_script_index_reports_include_cycles(tmp_path: Path) -> None:
         script_compile.ScriptIndex(script_dir)
 
     message = str(exc_info.value)
-    assert message.startswith("Error: Include cycle detected: ")
-    cycle_path = message.removeprefix("Error: Include cycle detected: ").split(" -> ")
+    assert message.startswith("E: Include cycle detected: ")
+    cycle_path = message.removeprefix("E: Include cycle detected: ").split(" -> ")
     assert cycle_path[0] == cycle_path[-1]
     assert set(cycle_path) == {"inc_alpha.nss", "inc_beta.nss"}
 

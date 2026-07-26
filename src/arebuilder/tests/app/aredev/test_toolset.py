@@ -273,8 +273,7 @@ def test_toolset_container_uses_mounted_hak_dir_for_dependency_filter(
     assert "could not be inspected" not in output
     assert (
         "W: bad_area: Tile 2 is unavailable in custom01.set; omitting area. "
-        "Please update custom_tiles.hak."
-        in output
+        "Please update custom_tiles.hak." in output
     )
     assert not (host_modules / "are-dev-pgcc" / "bad_area.are").exists()
 

@@ -101,6 +101,22 @@ def find_nwn_client_executable(
     return matches[0] if matches else None
 
 
+def resolve_docker_executable(
+    *,
+    system: str | None = None,
+    environ: Mapping[str, str] | None = None,
+) -> str:
+    """Resolve a Docker engine starter executable path from common host locations."""
+
+    for candidate in _docker_executable_candidates(
+        system=system or platform.system(),
+        environ=environ or os.environ,
+    ):
+        if candidate.is_file():
+            return str(candidate)
+    return ""
+
+
 def _client_os_variant(*, system: str, machine: str) -> str:
     """Return the expected NWN client binary variant for the host OS."""
 
@@ -258,6 +274,41 @@ def _first_env_path(
         if path is not None:
             return path
     return None
+
+
+def _docker_executable_candidates(
+    *,
+    system: str,
+    environ: Mapping[str, str],
+) -> list[Path]:
+    """Return conservative host Docker starter candidates for scaffold defaults."""
+
+    if system == "Darwin":
+        paths = (
+            "/Applications/Docker.app/Contents/MacOS/Docker",
+            "/opt/homebrew/bin/orb",
+            "/Applications/OrbStack.app/Contents/MacOS/bin/orb",
+        )
+        return [Path(path) for path in paths]
+    if system == "Windows":
+        return _deduplicate_paths(
+            [
+                Path(root) / "Docker" / "Docker" / "Docker Desktop.exe"
+                for root in (
+                    environ.get("ProgramFiles"),
+                    environ.get("ProgramW6432"),
+                )
+                if root
+            ]
+        )
+    paths = (
+        "/usr/bin/docker-desktop",
+        "/usr/local/bin/docker-desktop",
+        "/opt/docker-desktop/bin/docker-desktop",
+        "/usr/bin/dockerd-rootless.sh",
+        "/usr/local/bin/dockerd-rootless.sh",
+    )
+    return [Path(path) for path in paths]
 
 
 def _expand_optional_path(value: str) -> Path | None:

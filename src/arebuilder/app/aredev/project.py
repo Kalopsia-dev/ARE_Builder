@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from importlib import resources
 from pathlib import Path
 from typing import Literal
 
@@ -7,7 +8,11 @@ from arebuilder.config.env import (
     parse_key_value_text,
     validate_build_target,
 )
-from arebuilder.config.nwn_paths import resolve_nwn_home_root, resolve_nwn_install_root
+from arebuilder.config.paths import (
+    resolve_docker_executable,
+    resolve_nwn_home_root,
+    resolve_nwn_install_root,
+)
 from arebuilder.config.runtime import BuilderSettings
 
 BuilderBackend = Literal["native", "docker"]
@@ -23,6 +28,11 @@ NWN_HOME_PATH_DESCRIPTION = (
     "host machine, usually Documents/Neverwinter Nights. This is the folder "
     "that contains or receives client-side hak/ and tlk/ directories."
 )
+DOCKER_EXECUTABLE_DESCRIPTION = (
+    "DOCKER_EXECUTABLE should point to an absolute host executable path that "
+    "starts the Docker engine or a compatible Docker runtime. AREDev runs this "
+    "executable with no arguments before commands that rely on Docker."
+)
 
 
 class BuilderConfigError(ValueError):
@@ -35,6 +45,7 @@ class InferredProjectPaths:
 
     nwn_install_path: str = ""
     nwn_home_path: str = ""
+    docker_executable: str = ""
     warnings: tuple[str, ...] = ()
 
 
@@ -49,6 +60,7 @@ class BuilderConfig:
     nwserver_image: str = "dmhoodoo/aredevnwnxserver:latest"
     nwn_install_path: str = ""
     nwn_home_path: str = ""
+    docker_executable: str = ""
 
     @property
     def module_name(self) -> str:
@@ -67,6 +79,13 @@ class BuilderConfig:
         """Return the configured or auto-detected NWN home root."""
 
         return resolve_nwn_home_root(self.nwn_home_path)
+
+    @property
+    def docker_executable_path(self) -> Path | None:
+        """Return the configured Docker engine starter executable path."""
+
+        value = self.docker_executable.strip()
+        return expand_path(value) if value else None
 
 
 @dataclass(slots=True, frozen=True)
@@ -224,7 +243,7 @@ def load_arebuilder_env(root: Path | str) -> BuilderConfig:
     """Load project-local AREDev settings from an initialized project root."""
 
     layout = ProjectLayout.from_root(root)
-    values = _default_config_values()
+    values = _template_config_values()
     config_path = layout.arebuilder_env_path
     if not config_path.exists():
         raise BuilderConfigError(f"Missing builder configuration: {config_path}")
@@ -239,12 +258,13 @@ def infer_project_paths(system: str | None = None) -> InferredProjectPaths:
     warnings: list[str] = []
     nwn_install_root = resolve_nwn_install_root(system=system)
     nwn_home_root = resolve_nwn_home_root(system=system)
+    docker_executable = resolve_docker_executable(system=system)
 
     if nwn_install_root is None:
         # Scaffolding should still complete when detection fails; the generated
         # env file keeps an empty field that the user can fill in later.
         warnings.append(
-            "Warning: Unable to infer NWN_INSTALL_PATH. "
+            "W: Unable to infer NWN_INSTALL_PATH. "
             f"{NWN_INSTALL_PATH_DESCRIPTION} Set it in "
             f"config/{AREBUILDER_ENV_FILENAME} before compiling scripts or "
             "using Dockerized AREDev."
@@ -253,10 +273,17 @@ def infer_project_paths(system: str | None = None) -> InferredProjectPaths:
         # NWN_HOME_PATH is optional for pure server builds, so this remains a
         # warning rather than a scaffold-blocking error.
         warnings.append(
-            "Warning: Unable to infer NWN_HOME_PATH. "
+            "W: Unable to infer NWN_HOME_PATH. "
             f"{NWN_HOME_PATH_DESCRIPTION} Set it in "
             f"config/{AREBUILDER_ENV_FILENAME} if you want generated HAK and "
             "TLK content linked into the game client."
+        )
+    if not docker_executable:
+        warnings.append(
+            "I: Unable to infer DOCKER_EXECUTABLE. "
+            f"{DOCKER_EXECUTABLE_DESCRIPTION} Set it in "
+            f"config/{AREBUILDER_ENV_FILENAME} if you want Docker to launch "
+            "automatically when needed."
         )
 
     return InferredProjectPaths(
@@ -264,6 +291,7 @@ def infer_project_paths(system: str | None = None) -> InferredProjectPaths:
         if nwn_install_root is not None
         else "",
         nwn_home_path=nwn_home_root.as_posix() if nwn_home_root is not None else "",
+        docker_executable=docker_executable,
         warnings=tuple(warnings),
     )
 
@@ -274,19 +302,15 @@ def render_arebuilder_env(
     builder_backend: BuilderBackend = "native",
     nwn_install_path: str | None = None,
     nwn_home_path: str | None = None,
+    docker_executable: str | None = None,
     system: str | None = None,
 ) -> str:
     """Render a project-local AREDev env file with concrete values."""
 
     validate_build_target(build_target, error_type=BuilderConfigError)
     _validate_backend(builder_backend)
-    inferred_paths = (
-        infer_project_paths(system=system)
-        if nwn_install_path is None or nwn_home_path is None
-        else InferredProjectPaths()
-    )
-    values = _default_config_values()
-    values.update(
+    inferred_paths = infer_project_paths(system=system)
+    return _render_arebuilder_env_template(
         {
             "BUILD_TARGET": build_target,
             "BUILDER_BACKEND": builder_backend,
@@ -296,11 +320,11 @@ def render_arebuilder_env(
             "NWN_HOME_PATH": nwn_home_path
             if nwn_home_path is not None
             else inferred_paths.nwn_home_path,
+            "DOCKER_EXECUTABLE": docker_executable
+            if docker_executable is not None
+            else inferred_paths.docker_executable,
         }
     )
-    # Stable env ordering makes regenerated scaffolds easy to review and keeps
-    # tests focused on intentional value changes.
-    return _format_env_values(values)
 
 
 def build_project_builder_settings(
@@ -335,42 +359,64 @@ def load_env_file(path: Path) -> dict[str, str]:
 def _build_config(values: dict[str, str]) -> BuilderConfig:
     """Construct the single-target BuildConfig from resolved runtime paths."""
 
-    backend = values.get("BUILDER_BACKEND", "native").strip().lower()
+    defaults = BuilderConfig()
+    backend = values.get("BUILDER_BACKEND", defaults.builder_backend).strip().lower()
     _validate_backend(backend)
-    build_target = values.get("BUILD_TARGET", "pgcc").strip()
+    build_target = values.get("BUILD_TARGET", defaults.build_target).strip()
     validate_build_target(build_target, error_type=BuilderConfigError)
     return BuilderConfig(
         build_target=build_target,
         builder_backend=backend,  # type: ignore[arg-type]
-        arebuilder_repo=values.get("AREBUILDER_REPO", DEFAULT_AREBUILDER_REPO),
-        builder_image=values.get("BUILDER_IMAGE", "kalopsiadev/arebuilder:latest"),
-        nwserver_image=values.get("NWSERVER_IMAGE", "dmhoodoo/aredevnwnxserver:latest"),
-        nwn_install_path=values.get("NWN_INSTALL_PATH", ""),
-        nwn_home_path=values.get("NWN_HOME_PATH", ""),
+        arebuilder_repo=values.get("AREBUILDER_REPO", defaults.arebuilder_repo),
+        builder_image=values.get("BUILDER_IMAGE", defaults.builder_image),
+        nwserver_image=values.get("NWSERVER_IMAGE", defaults.nwserver_image),
+        nwn_install_path=values.get("NWN_INSTALL_PATH", defaults.nwn_install_path),
+        nwn_home_path=values.get("NWN_HOME_PATH", defaults.nwn_home_path),
+        docker_executable=values.get(
+            "DOCKER_EXECUTABLE",
+            defaults.docker_executable,
+        ),
     )
 
 
-def _default_config_values() -> dict[str, str]:
-    """Return scaffold defaults for an AREDev project config file."""
+def _template_config_values() -> dict[str, str]:
+    """Return scaffold defaults parsed from the packaged AREDev env template."""
 
-    return {
-        "BUILD_TARGET": "pgcc",
-        "BUILDER_BACKEND": "native",
-        "AREBUILDER_REPO": DEFAULT_AREBUILDER_REPO,
-        "BUILDER_IMAGE": "kalopsiadev/arebuilder:latest",
-        "NWSERVER_IMAGE": "dmhoodoo/aredevnwnxserver:latest",
-        "NWN_INSTALL_PATH": "",
-        "NWN_HOME_PATH": "",
-    }
+    return parse_key_value_text(_read_arebuilder_env_template())
 
 
-def _format_env_values(values: dict[str, str]) -> str:
-    """Serialize environment values in stable key order for generated config files."""
+def _render_arebuilder_env_template(values: dict[str, str]) -> str:
+    """Render the packaged env template with selected concrete init values."""
 
-    lines = ["# AREDev project settings"]
-    for key, value in values.items():
-        lines.append(f"{key}={_quote_config_value(value)}")
-    return "\n".join(lines) + "\n"
+    path_like_keys = {"NWN_INSTALL_PATH", "NWN_HOME_PATH", "DOCKER_EXECUTABLE"}
+    missing_keys = set(values)
+    rendered_lines: list[str] = []
+    for line in _read_arebuilder_env_template().splitlines():
+        key, separator, _value = line.partition("=")
+        if separator and key in values:
+            value = values[key]
+            if key in path_like_keys:
+                value = _quote_config_value(value)
+            rendered_lines.append(f"{key}={value}")
+            missing_keys.remove(key)
+            continue
+        rendered_lines.append(line)
+
+    if missing_keys:
+        missing = ", ".join(sorted(missing_keys))
+        raise BuilderConfigError(
+            f"AREDev config template is missing required key(s): {missing}"
+        )
+    return "\n".join(rendered_lines) + "\n"
+
+
+def _read_arebuilder_env_template() -> str:
+    """Read the packaged AREDev builder env template."""
+
+    template_root = resources.files("arebuilder").joinpath("templates", "aredev")
+    return template_root.joinpath("config", AREBUILDER_ENV_FILENAME).read_text(
+        encoding="utf-8"
+    )
 
 
 def _quote_config_value(value: str | Path) -> str:

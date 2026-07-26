@@ -218,12 +218,13 @@ class ScriptIndex:
         }
 
     def get_modified(self, state_path: Path) -> set[Script]:
-        """Return primary scripts whose content hash differs from the saved state."""
+        """Return indexed local scripts whose content hash differs from saved state."""
 
         hash_index = read_hash_index(state_path)
         return {
             script
-            for script in self.primary_scripts()
+            for script in self
+            if script.contents
             if script.name not in hash_index or hash_index[script.name] != script.hash
         }
 
@@ -297,7 +298,7 @@ class ScriptIndex:
             cycle_path = " -> ".join(
                 f"{script.name}.nss" for script in reversed(exc.args[1])
             )
-            raise CompileError(f"Error: Include cycle detected: {cycle_path}") from exc
+            raise CompileError(f"E: Include cycle detected: {cycle_path}") from exc
 
         for script in ordered_scripts:
             includes = set(direct_includes[script])
@@ -344,6 +345,7 @@ class GameScriptSource:
         self.path = path
         self.reader: KeyReader | None = None
         self.scripts: set[str] = set()
+        self._cache: dict[str, bytes | None] = {}
 
         if path.is_dir():
             # Tests and loose installs can provide base scripts as plain files.
@@ -362,17 +364,29 @@ class GameScriptSource:
 
         return script_name in self.scripts
 
-    @lru_cache(maxsize=None)
     def get(self, script_name: str) -> bytes | None:
         """Return a matching script payload or ``None`` when it is unavailable."""
 
-        if script_name not in self:
-            return None
-        if self.reader is not None:
-            with self.lock:
-                return self.reader.read_file(script_name)
         with self.lock:
-            return (self.path / script_name).read_bytes()
+            if script_name in self._cache:
+                return self._cache[script_name]
+            if script_name not in self:
+                contents = None
+            elif self.reader is not None:
+                contents = self.reader.read_file(script_name)
+            else:
+                contents = (self.path / script_name).read_bytes()
+            self._cache[script_name] = contents
+            return contents
+
+    def close(self) -> None:
+        """Release archive handles and cached script data owned by this source."""
+
+        with self.lock:
+            if self.reader is not None:
+                self.reader.close()
+                self.reader = None
+            self._cache.clear()
 
 
 class GameScriptSources:
@@ -397,9 +411,16 @@ class GameScriptSources:
         """Return a matching script payload or ``None`` when it is unavailable."""
 
         for source in self.sources:
-            if script := source.get(script_name):
+            if (script := source.get(script_name)) is not None:
                 return script
         return None
+
+    def close(self) -> None:
+        """Release every game-script source owned by this collection."""
+
+        for source in self.sources:
+            source.close()
+        self.sources.clear()
 
 
 def _key_reader_filenames(reader: KeyReader) -> list[str]:
@@ -492,23 +513,36 @@ class StatefulScriptCompiler:
     def run(self) -> CompileResult:
         """Run the configured compiler mode, creating state first when smart compile needs it."""
 
-        self._validate_game_script_sources()
-        selector = self.selector
-        if self.use_state and selector not in {"all", "*"} and not self._has_state():
-            print("All scripts will be compiled to initialise the index.", end="\n\n")
-            selector = "all"
+        try:
+            self._validate_game_script_sources()
+            selector = self.selector
+            if (
+                self.use_state
+                and selector not in {"all", "*"}
+                and not self._has_state()
+            ):
+                print(
+                    "All scripts will be compiled to initialise the index.",
+                    end="\n\n",
+                )
+                selector = "all"
 
-        self.script_index = ScriptIndex(self.script_dir, include_dirs=self.include_dirs)
+            self.script_index = ScriptIndex(
+                self.script_dir,
+                include_dirs=self.include_dirs,
+            )
 
-        if selector is None:
-            return self.compile_modified()
+            if selector is None:
+                return self.compile_modified()
 
-        param = ScriptIndex.normalise_script_name(selector)
-        if param == "all":
-            return self.compile_all()
-        if param.endswith("*"):
-            return self.compile_wildcard(param)
-        return self.compile_script(param)
+            param = ScriptIndex.normalise_script_name(selector)
+            if param == "all":
+                return self.compile_all()
+            if param.endswith("*"):
+                return self.compile_wildcard(param)
+            return self.compile_script(param)
+        finally:
+            self.game_scripts.close()
 
     def compile_script(self, script_name: str) -> CompileResult:
         """Compile one named primary script and refresh state hashes."""
@@ -516,9 +550,9 @@ class StatefulScriptCompiler:
         script_index = self._require_index()
         script = script_index.get(script_name)
         if script is None or not script.primary:
-            raise CompileError(f"Error: Unable to find {script_name}.nss")
+            raise CompileError(f"E: Unable to find {script_name}.nss")
         if not script.contents:
-            raise CompileError(f"Error: {script_name}.nss is a base game script.")
+            raise CompileError(f"E: {script_name}.nss is a base game script.")
 
         if script.is_include or not script_index.is_compilable(script):
             print("Include file detected. Checking dependencies...", end="\n\n")
@@ -714,16 +748,13 @@ class StatefulScriptCompiler:
                 file_path.unlink()
 
     def _missing_output_scripts(self) -> set[Script]:
-        """Return current scripts missing from at least one configured output directory."""
+        """Return current scripts missing from the canonical output directory."""
 
         script_index = self._require_index()
         return {
             script
             for script in script_index.compilable_primary_scripts()
-            if any(
-                not (output_dir / f"{script.name}.ncs").is_file()
-                for output_dir in self.output_dirs
-            )
+            if not (self.output_dir / f"{script.name}.ncs").is_file()
         }
 
     def _has_state(self) -> bool:
@@ -742,22 +773,19 @@ class StatefulScriptCompiler:
             raise CompileError("A state path is required to update script hashes.")
         hashes = read_hash_index(self.state_path)
         hashes.update(
-            {
-                script.name: script.hash
-                for script in modified
-                if script.primary and script.contents
-            }
+            {script.name: script.hash for script in modified if script.contents}
         )
         return hashes
 
     def _hash_all(self) -> dict[str, int] | None:
-        """Build a complete hash index for every primary script currently indexed."""
+        """Build a complete hash index for every indexed local script."""
 
         if not self.use_state:
             return None
         return {
             script.name: script.hash
-            for script in self._require_index().primary_scripts()
+            for script in self._require_index()
+            if script.contents
         }
 
     def _require_index(self) -> ScriptIndex:
@@ -775,7 +803,7 @@ class StatefulScriptCompiler:
         if self.game_scripts.get("nwscript.nss") is not None:
             return
         raise CompileError(
-            "Error: Unable to find nwscript.nss in the NWN install data. "
+            "E: Unable to find nwscript.nss in the NWN install data. "
             "Set NWN_INSTALL_PATH to the host Neverwinter Nights install root "
             "and make sure it is mounted at /nwn/install in Dockerized AREDev."
         )
@@ -904,7 +932,7 @@ def write_hash_index(path: Path, hash_index: dict[str, int]) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(hash_index), encoding="utf-8")
     except OSError as exc:
-        raise CompileError(f"Error: Unable to store script hashes ({exc})") from exc
+        raise CompileError(f"E: Unable to store script hashes ({exc})") from exc
 
 
 def delete_hash_index(path: Path) -> None:
