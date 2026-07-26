@@ -126,6 +126,49 @@ def test_modified_compile_initialises_state_then_noops_when_unchanged(
     assert result.compiled_count == 0
 
 
+def test_modified_compile_ignores_missing_secondary_output(tmp_path: Path) -> None:
+    """Verify an empty live mirror does not make unchanged scripts look modified."""
+
+    script_dir = tmp_path / "scripts"
+    output_dir = tmp_path / "compiled"
+    live_output_dir = tmp_path / "development"
+    state_path = tmp_path / "temp" / "script_index.json"
+    script_dir.mkdir()
+    output_dir.mkdir()
+    live_output_dir.mkdir()
+    _write_script(script_dir / "main_one.nss", "void main() {}")
+
+    compile_scripts(
+        script_dir=script_dir,
+        output_dir=output_dir,
+        state_path=state_path,
+        compiler_factory=fake_compiler_factory,
+    )
+
+    result = compile_scripts(
+        script_dir=script_dir,
+        output_dir=output_dir,
+        secondary_output_dir=live_output_dir,
+        state_path=state_path,
+        compiler_factory=fake_compiler_factory,
+    )
+
+    assert result.compiled_count == 0
+
+    _write_script(script_dir / "main_one.nss", "void main() { int changed = 1; }")
+    result = compile_scripts(
+        script_dir=script_dir,
+        output_dir=output_dir,
+        secondary_output_dir=live_output_dir,
+        state_path=state_path,
+        compiler_factory=fake_compiler_factory,
+    )
+
+    assert result.compiled_count == 1
+    assert (output_dir / "main_one.ncs").read_bytes() == b"compiled:main_one"
+    assert (live_output_dir / "main_one.ncs").read_bytes() == b"compiled:main_one"
+
+
 def test_include_change_compiles_dependent_primary_scripts(tmp_path: Path) -> None:
     """Verify changing an include recompiles every dependent primary script."""
 

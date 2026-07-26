@@ -715,16 +715,13 @@ class StatefulScriptCompiler:
                 file_path.unlink()
 
     def _missing_output_scripts(self) -> set[Script]:
-        """Return current scripts missing from at least one configured output directory."""
+        """Return current scripts missing from the canonical output directory."""
 
         script_index = self._require_index()
         return {
             script
             for script in script_index.compilable_primary_scripts()
-            if any(
-                not (output_dir / f"{script.name}.ncs").is_file()
-                for output_dir in self.output_dirs
-            )
+            if not (self.output_dir / f"{script.name}.ncs").is_file()
         }
 
     def _has_state(self) -> bool:
