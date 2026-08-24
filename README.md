@@ -73,6 +73,23 @@ Common AREDev commands are:
 | `database [drop]` | Open the test database client, or reset database state with `drop`. |
 | `update` | Update native `arebuilder` from `AREBUILDER_REPO` and pull refreshed Docker images. |
 
+### Profiler Monitoring
+
+`aredev start` also starts InfluxDB and Grafana for local NWNX Profiler
+monitoring. Open `http://127.0.0.1:3000` to view the provisioned
+**NWNX Profiler** dashboard. Anonymous viewer access is enabled; use `admin` /
+`aredev` when administrator access is needed for local dashboard editing.
+
+InfluxDB is available only inside the AREDev Compose network. Profiler telemetry
+and Grafana state use their own named volumes, so they persist across
+`aredev stop` and are not removed by `database drop`. Detailed Profiler
+collection adds instrumentation overhead, so compare performance-sensitive
+results with an uninstrumented run before treating them as production baselines.
+
+Existing AREDev projects receive the monitoring scaffold only when deliberately
+refreshed with `arebuilder init . --force`. A force refresh overwrites
+scaffold-managed configuration, so preserve any local changes first.
+
 ## Compile Command
 
 `compile` is the main direct builder command for shared NWScript sources. It reads scripts from the shared resources tree, writes compiled `.ncs` files, and stores a state file so later runs can compile only changed scripts and affected dependents.

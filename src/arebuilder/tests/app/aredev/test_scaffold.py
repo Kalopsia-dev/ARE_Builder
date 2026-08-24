@@ -1,3 +1,4 @@
+import json
 import os
 import shutil
 import subprocess
@@ -75,6 +76,19 @@ def _bind_blocks_for_target(compose_text: str, target: str) -> list[str]:
         for block in blocks
         if any(line.strip() == f"target: {target}" for line in block)
     ]
+
+
+def _compose_service_block(compose_text: str, service: str) -> str:
+    """Extract one generated top-level Compose service block."""
+
+    lines = compose_text.splitlines()
+    start = lines.index(f"  {service}:")
+    end = len(lines)
+    for index in range(start + 1, len(lines)):
+        if lines[index] and not lines[index].startswith("    "):
+            end = index
+            break
+    return "\n".join(lines[start:end])
 
 
 def _assert_compose_uses_minimal_builder_mounts(compose_text: str) -> None:
@@ -235,6 +249,297 @@ def test_init_creates_expected_scaffold_without_resource_artifacts(
     )
 
 
+def test_init_generates_profiler_dashboard_assets(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """Verify init provisions only the general NWNX Profiler dashboard."""
+
+    _pretend_host_platform(monkeypatch, "linux")
+    project = tmp_path / "AREDev"
+
+    initialize_aredev_project(project)
+
+    grafana_config = project / "config" / "grafana"
+    datasource_path = (
+        grafana_config / "provisioning" / "datasources" / "nwnx.yml"
+    )
+    provider_path = grafana_config / "provisioning" / "dashboards" / "nwnx.yml"
+    dashboard_path = grafana_config / "dashboards" / "nwnx-profiler.json"
+    assert datasource_path.is_file()
+    assert provider_path.is_file()
+    assert dashboard_path.is_file()
+
+    datasource_text = datasource_path.read_text(encoding="utf-8")
+    assert "type: influxdb" in datasource_text
+    assert "access: proxy" in datasource_text
+    assert "uid: nwnx-profiler" in datasource_text
+    assert "url: http://influxdb:8086" in datasource_text
+    assert "database: nwn" in datasource_text
+    assert "isDefault: true" in datasource_text
+    assert "httpMode: GET" in datasource_text
+
+    provider_text = provider_path.read_text(encoding="utf-8")
+    assert "path: /var/lib/grafana/dashboards" in provider_text
+    assert "allowUiUpdates: true" in provider_text
+    assert "\n    editable:" not in provider_text
+
+    dashboard = json.loads(dashboard_path.read_text(encoding="utf-8"))
+    assert dashboard["uid"] == "nwnx-profiler"
+    assert {panel["title"] for panel in dashboard["panels"]} == {
+        "Game tick rate",
+        "AI event queue depth",
+        "AI update-list objects",
+        "Main loop work",
+        "AI master work",
+        "Creature AI work",
+        "Creature event-handler work",
+        "NWScript work",
+        "Pathing work",
+    }
+    assert {
+        panel["datasource"]["uid"] for panel in dashboard["panels"]
+    } == {"nwnx-profiler"}
+    assert {
+        target["datasource"]["uid"]
+        for panel in dashboard["panels"]
+        for target in panel["targets"]
+    } == {"nwnx-profiler"}
+    assert {
+        panel["title"]: panel["targets"][0]["query"]
+        for panel in dashboard["panels"]
+    } == {
+        "Game tick rate": (
+            'SELECT mean("Count") FROM "NWNX_Profiler.GameTickRate" '
+            "WHERE $timeFilter GROUP BY time(1s) fill(null)"
+        ),
+        "AI event queue depth": (
+            'SELECT mean("Count") FROM "NWNX_Profiler.AIQueuedEvents" '
+            "WHERE $timeFilter GROUP BY time(1s) fill(null)"
+        ),
+        "AI update-list objects": (
+            'SELECT mean("Count") FROM "NWNX_Profiler.AIUpdateListObjects" '
+            'WHERE $timeFilter GROUP BY time(1s), "Level" fill(null)'
+        ),
+        "Main loop work": (
+            'SELECT mean("ns") / 1000000 FROM "NWNX_Profiler.TimingEvent" '
+            "WHERE $timeFilter AND \"EventName\" = 'ExoAppMainLoop' "
+            "GROUP BY time(1s) fill(null)"
+        ),
+        "AI master work": (
+            'SELECT mean("ns") / 1000000 FROM "NWNX_Profiler.TimingEvent" '
+            "WHERE $timeFilter AND \"EventName\" = 'AIMasterUpdateState' "
+            "GROUP BY time(1s) fill(null)"
+        ),
+        "Creature AI work": (
+            'SELECT mean("ns") / 1000000 FROM "NWNX_Profiler.TimingEvent" '
+            "WHERE $timeFilter AND \"EventName\" = 'AIUpdateCreature' "
+            "GROUP BY time(1s) fill(null)"
+        ),
+        "Creature event-handler work": (
+            'SELECT mean("ns") / 1000000 FROM "NWNX_Profiler.TimingEvent" '
+            "WHERE $timeFilter AND \"EventName\" = 'EventHandlerCreature' "
+            "GROUP BY time(1s) fill(null)"
+        ),
+        "NWScript work": (
+            'SELECT sum("ns") / 1000000 FROM "NWNX_Profiler.TimingEvent" '
+            "WHERE $timeFilter AND \"EventName\" = 'RunScript' "
+            "GROUP BY time(1s) fill(null)"
+        ),
+        "Pathing work": (
+            'SELECT sum("ns") / 1000000 FROM "NWNX_Profiler.TimingEvent" '
+            "WHERE $timeFilter AND \"EventName\" = 'PlotPath' "
+            "GROUP BY time(1s) fill(null)"
+        ),
+    }
+
+
+def test_init_configures_profiler_monitoring_services(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """Verify generated services export NWNX Profiler data only to local Grafana."""
+
+    _pretend_host_platform(monkeypatch, "linux")
+    project = tmp_path / "AREDev"
+
+    initialize_aredev_project(project)
+
+    compose_text = (project / "docker-compose.yml").read_text(encoding="utf-8")
+    assert "  influxdb:\n" in compose_text
+    assert "  grafana:\n" in compose_text
+    influxdb = _compose_service_block(compose_text, "influxdb")
+    grafana = _compose_service_block(compose_text, "grafana")
+    nwserver = _compose_service_block(compose_text, "nwserver")
+    assert "image: influxdb:1.12.4" in influxdb
+    assert "INFLUXDB_DB: nwn" in influxdb
+    assert 'INFLUXDB_UDP_ENABLED: "true"' in influxdb
+    assert 'INFLUXDB_UDP_BIND_ADDRESS: ":8089"' in influxdb
+    assert "INFLUXDB_UDP_DATABASE: nwn" in influxdb
+    assert 'INFLUXDB_REPORTING_DISABLED: "true"' in influxdb
+    assert "- profiler_influxdb:/var/lib/influxdb" in influxdb
+    assert "ports:" not in influxdb
+    assert "image: grafana/grafana:13.1.1" in grafana
+    assert "      - influxdb" in grafana
+    assert 'GF_AUTH_ANONYMOUS_ENABLED: "true"' in grafana
+    assert "GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer" in grafana
+    assert "GF_SECURITY_ADMIN_USER: admin" in grafana
+    assert "GF_SECURITY_ADMIN_PASSWORD: aredev" in grafana
+    assert 'GF_USERS_ALLOW_SIGN_UP: "false"' in grafana
+    assert '"127.0.0.1:3000:3000"' in grafana
+    assert "- profiler_grafana:/var/lib/grafana" in grafana
+    assert grafana.count("read_only: true") == 3
+    for source, target in (
+        (
+            "config/grafana/provisioning/datasources",
+            "/etc/grafana/provisioning/datasources",
+        ),
+        (
+            "config/grafana/provisioning/dashboards",
+            "/etc/grafana/provisioning/dashboards",
+        ),
+        ("config/grafana/dashboards", "/var/lib/grafana/dashboards"),
+    ):
+        assert f"source: ${{AREDEV_CONFIG_ROOT:-.}}/{source}" in grafana
+        assert f"target: {target}" in grafana
+    for dependency in ("db", "grafana", "influxdb"):
+        assert f"      - {dependency}" in nwserver
+    assert "name: aredev_profiler_influxdb" in compose_text
+    assert "name: aredev_profiler_grafana" in compose_text
+    assert not compose_text.startswith("name:")
+
+    nwserver_env = _env_values(
+        (project / "config" / "nwserver.env").read_text(encoding="utf-8")
+    )
+    assert nwserver_env["NWNX_METRICS_INFLUXDB_SKIP"] == "no"
+    assert nwserver_env["NWNX_METRICS_INFLUXDB_HOST"] == "influxdb"
+    assert nwserver_env["NWNX_METRICS_INFLUXDB_PORT"] == "8089"
+    for key in (
+        "NWNX_PROFILER_ENABLE_OVERHEAD_COMPENSATION",
+        "NWNX_PROFILER_ENABLE_AI_MASTER_UPDATES",
+        "NWNX_PROFILER_ENABLE_MAIN_LOOP",
+        "NWNX_PROFILER_ENABLE_OBJECT_AI_UPDATES",
+        "NWNX_PROFILER_ENABLE_OBJECT_EVENT_HANDLERS",
+        "NWNX_PROFILER_ENABLE_PATHING",
+        "NWNX_PROFILER_ENABLE_SCRIPTS",
+        "NWNX_PROFILER_SCRIPTS_AREA_TIMINGS",
+        "NWNX_PROFILER_SCRIPTS_TYPE_TIMINGS",
+        "NWNX_PROFILER_ENABLE_TICKRATE",
+    ):
+        assert nwserver_env[key] == "yes"
+    assert nwserver_env["NWNX_PROFILER_AI_MASTER_UPDATES_OVERKILL"] == "no"
+    assert nwserver_env["NWNX_PROFILER_ENABLE_NET_LAYER"] == "no"
+    assert nwserver_env["NWNX_PROFILER_ENABLE_NET_MESSAGES"] == "no"
+
+
+def test_generated_profiler_compose_configuration_is_valid(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """Validate monitoring topology through Docker Compose when it is available."""
+
+    docker = shutil.which("docker")
+    if docker is None:
+        pytest.skip("Docker CLI is unavailable")
+    compose_version = subprocess.run(
+        [docker, "compose", "version"],
+        text=True,
+        capture_output=True,
+    )
+    if compose_version.returncode != 0:
+        pytest.skip("Docker Compose plugin is unavailable")
+
+    _pretend_host_platform(monkeypatch, "linux")
+    project = tmp_path / "AREDev"
+    initialize_aredev_project(project)
+    compose_environment = os.environ.copy()
+    compose_environment.update(
+        {
+            "AREDEV_CONFIG_ROOT": str(project),
+            "AREDEV_HOST_ROOT": str(project),
+            "AREDEV_NWN_HOME_ROOT": str(project / "server"),
+            "AREDEV_NWN_INSTALL_ROOT": str(project),
+            "NWN_MODULE": "demo",
+        }
+    )
+    completed = subprocess.run(
+        [
+            docker,
+            "compose",
+            "--project-name",
+            "aredev-test",
+            "--project-directory",
+            str(project),
+            "--file",
+            str(project / "docker-compose.yml"),
+            "config",
+            "--format",
+            "json",
+        ],
+        cwd=project,
+        env=compose_environment,
+        text=True,
+        capture_output=True,
+    )
+    assert completed.returncode == 0, completed.stderr
+
+    configuration = json.loads(completed.stdout)
+    services = configuration["services"]
+    influxdb = services["influxdb"]
+    assert influxdb["environment"] == {
+        "INFLUXDB_DB": "nwn",
+        "INFLUXDB_REPORTING_DISABLED": "true",
+        "INFLUXDB_UDP_BIND_ADDRESS": ":8089",
+        "INFLUXDB_UDP_DATABASE": "nwn",
+        "INFLUXDB_UDP_ENABLED": "true",
+    }
+    assert influxdb.get("ports", []) == []
+    assert {mount["target"]: mount["source"] for mount in influxdb["volumes"]} == {
+        "/var/lib/influxdb": "profiler_influxdb"
+    }
+
+    grafana = services["grafana"]
+    assert grafana["environment"] == {
+        "GF_AUTH_ANONYMOUS_ENABLED": "true",
+        "GF_AUTH_ANONYMOUS_ORG_ROLE": "Viewer",
+        "GF_SECURITY_ADMIN_PASSWORD": "aredev",
+        "GF_SECURITY_ADMIN_USER": "admin",
+        "GF_USERS_ALLOW_SIGN_UP": "false",
+    }
+    assert set(grafana["depends_on"]) == {"influxdb"}
+    assert len(grafana["ports"]) == 1
+    assert {
+        key: grafana["ports"][0][key]
+        for key in ("host_ip", "target", "published", "protocol")
+    } == {
+        "host_ip": "127.0.0.1",
+        "target": 3000,
+        "published": "3000",
+        "protocol": "tcp",
+    }
+    grafana_mounts = {mount["target"]: mount for mount in grafana["volumes"]}
+    assert grafana_mounts["/var/lib/grafana"]["source"] == "profiler_grafana"
+    for target in (
+        "/etc/grafana/provisioning/datasources",
+        "/etc/grafana/provisioning/dashboards",
+        "/var/lib/grafana/dashboards",
+    ):
+        assert grafana_mounts[target]["type"] == "bind"
+        assert grafana_mounts[target]["read_only"] is True
+
+    assert set(services["nwserver"]["depends_on"]) == {
+        "db",
+        "grafana",
+        "influxdb",
+    }
+    assert configuration["volumes"]["profiler_influxdb"]["name"] == (
+        "aredev_profiler_influxdb"
+    )
+    assert configuration["volumes"]["profiler_grafana"]["name"] == (
+        "aredev_profiler_grafana"
+    )
+
+
 def test_init_generates_windows_batch_wrapper_without_shell_wrapper(
     tmp_path: Path,
     monkeypatch,
@@ -354,6 +659,61 @@ def test_init_refuses_conflicting_files_unless_forced(tmp_path: Path) -> None:
 
     assert arebuilder_env in result.overwritten_files
     assert "BUILD_TARGET=pgcc\n" in arebuilder_env.read_text(encoding="utf-8")
+
+
+def test_force_init_upgrades_a_pre_monitoring_scaffold(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """Verify force init refreshes managed config and adds monitoring assets."""
+
+    _pretend_host_platform(monkeypatch, "linux")
+    project = tmp_path / "AREDev"
+    initialize_aredev_project(project)
+
+    compose_path = project / "docker-compose.yml"
+    nwserver_env_path = project / "config" / "nwserver.env"
+    grafana_assets = (
+        project
+        / "config"
+        / "grafana"
+        / "provisioning"
+        / "datasources"
+        / "nwnx.yml",
+        project
+        / "config"
+        / "grafana"
+        / "provisioning"
+        / "dashboards"
+        / "nwnx.yml",
+        project
+        / "config"
+        / "grafana"
+        / "dashboards"
+        / "nwnx-profiler.json",
+    )
+    compose_path.write_text("services:\n  nwserver: {}\n", encoding="utf-8")
+    nwserver_env_path.write_text("NWNX_CORE_SKIP_ALL=no\n", encoding="utf-8")
+    for asset in grafana_assets:
+        asset.unlink()
+
+    with pytest.raises(ScaffoldConflictError):
+        initialize_aredev_project(project)
+    assert all(not asset.exists() for asset in grafana_assets)
+
+    result = initialize_aredev_project(project, force=True)
+
+    assert compose_path in result.overwritten_files
+    assert nwserver_env_path in result.overwritten_files
+    assert all(asset in result.created_files for asset in grafana_assets)
+    assert all(asset.is_file() for asset in grafana_assets)
+    assert "  grafana:\n" in compose_path.read_text(encoding="utf-8")
+    assert (
+        _env_values(nwserver_env_path.read_text(encoding="utf-8"))[
+            "NWNX_METRICS_INFLUXDB_SKIP"
+        ]
+        == "no"
+    )
 
 
 def test_init_cli_and_generated_templates_smoke(tmp_path: Path, monkeypatch) -> None:
