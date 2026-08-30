@@ -639,6 +639,51 @@ def test_init_configures_profiler_monitoring_services(
     assert nwserver_env["NWNX_PROFILER_ENABLE_NET_MESSAGES"] == "no"
 
 
+def test_init_disables_selinux_label_separation_only_for_bind_mount_services(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """Verify services reading host files opt out of SELinux label separation."""
+
+    _pretend_host_platform(monkeypatch, "linux")
+    project = tmp_path / "AREDev"
+
+    initialize_aredev_project(project)
+
+    compose_text = (project / "docker-compose.yml").read_text(encoding="utf-8")
+    for service in ("db", "grafana", "nwserver", "builder"):
+        block = _compose_service_block(compose_text, service)
+        assert "security_opt:" in block
+        assert "      - label=disable" in block
+
+    assert "security_opt:" not in _compose_service_block(compose_text, "influxdb")
+
+
+def test_init_exposes_absolute_nwn_home_symlink_targets_to_nwserver(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """Keep absolute project HAK/TLK links resolvable in the server container."""
+
+    _pretend_host_platform(monkeypatch, "linux")
+    project = tmp_path / "AREDev"
+    initialize_aredev_project(project)
+
+    nwserver = _compose_service_block(
+        (project / "docker-compose.yml").read_text(encoding="utf-8"),
+        "nwserver",
+    )
+    same_path_mount = """\
+      - type: bind
+        source: ${AREDEV_NWN_HOME_ROOT:-${NWN_HOME_PATH:-./server}}
+        target: ${AREDEV_NWN_HOME_MOUNT_TARGET:-/nwn/aredev-host-home}
+        read_only: true
+"""
+    assert same_path_mount in nwserver
+    assert "target: ${AREDEV_NWN_CONTENT_MOUNT_ROOT:-/nwn/home}/hak" in nwserver
+    assert "target: ${AREDEV_NWN_CONTENT_MOUNT_ROOT:-/nwn/home}/tlk" in nwserver
+
+
 def test_generated_profiler_compose_configuration_is_valid(
     tmp_path: Path,
     monkeypatch,

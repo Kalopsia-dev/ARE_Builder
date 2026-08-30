@@ -860,6 +860,23 @@ class AREDevController:
             target_path.mkdir(parents=True, exist_ok=True)
             # HAK/TLK folders may be large and shared with the user's NWN client,
             # so the project points at them instead of copying their contents.
+            if (
+                link_path.is_dir()
+                and not link_path.is_symlink()
+                and not _path_is_junction(link_path)
+                and any(link_path.iterdir())
+            ):
+                shadowed_path = link_path.with_name(f"{name}.aredev-shadowed")
+                if shadowed_path.exists() or shadowed_path.is_symlink():
+                    raise BuilderConfigError(
+                        "Unable to preserve populated directory because its backup "
+                        f"path already exists: {shadowed_path}"
+                    )
+                link_path.rename(shadowed_path)
+                self.output(
+                    f"W: Moved populated directory {link_path} to {shadowed_path} "
+                    "before linking it to the NWN home."
+                )
             _ensure_directory_symlink(link_path=link_path, target_path=target_path)
 
     def _validate_target_resources(self) -> bool:
@@ -1018,6 +1035,8 @@ class AREDevController:
         nwn_home_path = os.environ.get("AREDEV_NWN_HOME_ROOT") or str(
             self.config.nwn_home_root or self.layout.server_dir
         )
+        if sys.platform.startswith("linux") and Path(nwn_home_path).exists():
+            nwn_home_path = str(Path(nwn_home_path).resolve())
         # Host paths stay in the environment even for containerized Python; the
         # wrapper/host launcher use them to run Docker and NWN on the host side.
         env.update(
@@ -1034,6 +1053,12 @@ class AREDevController:
                 "NWN_HOME_PATH": nwn_home_path,
             }
         )
+        if sys.platform.startswith("linux"):
+            env["AREDEV_NWN_HOME_MOUNT_TARGET"] = nwn_home_path
+            if self.layout.hak_dir.is_symlink() and self.layout.tlk_dir.is_symlink():
+                env["AREDEV_NWN_CONTENT_MOUNT_ROOT"] = "/nwn/aredev-direct-content"
+            else:
+                env.pop("AREDEV_NWN_CONTENT_MOUNT_ROOT", None)
         if extra_env:
             env.update(extra_env)
         if os.environ.get("DOCKER_HOST"):

@@ -101,7 +101,7 @@ resolve_aredev_path() {
         *) path=$AREDEV_ROOT/$path ;;
     esac
     if [ -d "$path" ]; then
-        (CDPATH= cd "$path" && pwd)
+        (CDPATH= cd "$path" && pwd -P)
     else
         printf '%s\n' "$path"
     fi
@@ -210,6 +210,19 @@ resolve_docker_runtime_paths() {
 
     NWN_INSTALL_ROOT=$(resolve_aredev_path "$NWN_INSTALL_PATH")
     AREDEV_NWN_HOME_ROOT=$(resolve_aredev_path "$NWN_HOME_PATH")
+    if [ "$(uname -s 2>/dev/null || printf 'Unknown')" = "Linux" ]; then
+        AREDEV_NWN_HOME_MOUNT_TARGET=$AREDEV_NWN_HOME_ROOT
+        export AREDEV_NWN_HOME_MOUNT_TARGET
+        if [ -L "$AREDEV_ROOT/server/hak" ] && [ -L "$AREDEV_ROOT/server/tlk" ]; then
+            AREDEV_NWN_CONTENT_MOUNT_ROOT=/nwn/aredev-direct-content
+            export AREDEV_NWN_CONTENT_MOUNT_ROOT
+        else
+            unset AREDEV_NWN_CONTENT_MOUNT_ROOT
+        fi
+    else
+        unset AREDEV_NWN_HOME_MOUNT_TARGET
+        unset AREDEV_NWN_CONTENT_MOUNT_ROOT
+    fi
 
     # These values are consumed by docker-compose.yml and also preserved inside
     # the builder container as host-path metadata for bridge operations.

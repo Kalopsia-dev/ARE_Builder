@@ -537,6 +537,80 @@ def test_docker_backend_runs_builder_through_compose(tmp_path: Path) -> None:
     ] in runner.calls
 
 
+def test_docker_backend_uses_main_compose_file_with_podman(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify Podman uses podman-compose instead of Docker's Compose plugin."""
+
+    project = tmp_path / "AREDev"
+    initialize_aredev_project(project, backend="docker")
+    layout = ProjectLayout.from_root(project)
+    nwn_home = tmp_path / "real-nwn-home"
+    (nwn_home / "hak").mkdir(parents=True)
+    (nwn_home / "tlk").mkdir(parents=True)
+    nwn_home_alias = tmp_path / "nwn-home"
+    nwn_home_alias.symlink_to(nwn_home, target_is_directory=True)
+    layout.arebuilder_env_path.write_text(
+        layout.arebuilder_env_path.read_text(encoding="utf-8")
+        + f"NWN_HOME_PATH={nwn_home_alias}\n",
+        encoding="utf-8",
+    )
+    create_resource_dirs(layout)
+    provider = tmp_path / "bin" / "podman-compose"
+    provider.parent.mkdir()
+    _create_executable(provider)
+    monkeypatch.setenv("PATH", str(provider.parent))
+    calls: list[list[str]] = []
+    environments: list[dict[str, str]] = []
+
+    def podman_only_runner(
+        args,
+        *,
+        cwd,
+        env,
+        capture_output,
+        background,
+        detach=False,
+    ):
+        calls.append(list(args))
+        environments.append(dict(env or {}))
+        if args[0] == "docker":
+            raise FileNotFoundError(args[0])
+        return ProcessResult(0)
+
+    controller = AREDevController(
+        layout=layout,
+        config=load_arebuilder_env(project),
+        process_runner=podman_only_runner,
+        output=lambda _message: None,
+    )
+
+    assert controller.run("build", []) == 0
+
+    compose_call = next(call for call in calls if call[:2] == ["podman", "compose"])
+    assert compose_call == [
+        "podman",
+        "compose",
+        "-p",
+        "aredev",
+        "run",
+        "--rm",
+        "builder",
+        "all",
+        "are-dev-pgcc",
+    ]
+    compose_index = calls.index(compose_call)
+    assert environments[compose_index]["AREDEV_NWN_HOME_ROOT"] == str(nwn_home)
+    assert environments[compose_index]["AREDEV_NWN_HOME_MOUNT_TARGET"] == str(nwn_home)
+    assert (
+        environments[compose_index]["AREDEV_NWN_CONTENT_MOUNT_ROOT"]
+        == "/nwn/aredev-direct-content"
+    )
+    assert environments[compose_index]["PODMAN_COMPOSE_PROVIDER"] == str(provider)
+    assert environments[compose_index]["PODMAN_COMPOSE_WARNING_LOGS"] == "false"
+
+
 def test_docker_backend_inside_builder_container_reuses_current_process(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -652,36 +726,52 @@ def test_interactive_prompt_runs_commands_until_exit(tmp_path: Path) -> None:
     assert any("Usage:" in message for message in output)
 
 
-def test_build_links_empty_hak_and_tlk_dirs_to_nwn_home(tmp_path: Path) -> None:
-    """Verify build links project HAK and TLK dirs to NWN home."""
+def test_build_links_project_hak_and_tlk_to_nwn_home(
+    tmp_path: Path,
+) -> None:
+    """Keep the project and NWN client content directories in sync through links."""
 
+    nwn_home = tmp_path / "nwn-home"
     controller, layout, build_calls, _ = make_controller(
         tmp_path,
-        nwn_home=tmp_path / "nwn-home",
+        nwn_home=nwn_home,
     )
-
     assert controller.run("build", []) == 0
 
     assert build_calls == [("all", ["are-dev-pgcc"], False)]
-    assert layout.hak_dir.resolve() == tmp_path / "nwn-home" / "hak"
-    assert layout.tlk_dir.resolve() == tmp_path / "nwn-home" / "tlk"
+    assert layout.hak_dir.is_symlink()
+    assert layout.tlk_dir.is_symlink()
+    assert layout.hak_dir.resolve() == (nwn_home / "hak").resolve()
+    assert layout.tlk_dir.resolve() == (nwn_home / "tlk").resolve()
+    assert (nwn_home / "hak").is_dir()
+    assert (nwn_home / "tlk").is_dir()
 
 
-def test_build_refuses_to_replace_non_empty_hak_dir(tmp_path: Path) -> None:
-    """Verify build protects a non-empty project HAK directory."""
+def test_build_warns_and_moves_populated_hak_directory_before_linking(
+    tmp_path: Path,
+) -> None:
+    """Preserve displaced project content while restoring the client HAK link."""
 
     output: list[str] = []
     controller, layout, build_calls, _ = make_controller(
         tmp_path,
-        output=output.append,
         nwn_home=tmp_path / "nwn-home",
+        output=output.append,
     )
     (layout.hak_dir / "existing.hak").write_bytes(b"existing")
 
-    assert controller.run("build", []) == 1
+    assert controller.run("build", []) == 0
 
-    assert build_calls == []
-    assert any("non-empty directory" in message for message in output)
+    assert build_calls == [("all", ["are-dev-pgcc"], False)]
+    assert layout.hak_dir.is_symlink()
+    assert (
+        layout.server_dir / "hak.aredev-shadowed" / "existing.hak"
+    ).read_bytes() == b"existing"
+    assert output == [
+        "W: Moved populated directory "
+        f"{layout.hak_dir} to {layout.server_dir / 'hak.aredev-shadowed'} "
+        "before linking it to the NWN home."
+    ]
 
 
 @pytest.mark.parametrize("mode", [[], ["dm"]], ids=["player", "dm"])

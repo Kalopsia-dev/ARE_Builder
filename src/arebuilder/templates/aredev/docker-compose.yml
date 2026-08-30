@@ -5,6 +5,9 @@ services:
     container_name: aredevdbserver
     hostname: db
     image: docker.io/library/mariadb:10
+    # Host development data must retain labels used by native tools and NWN.
+    security_opt:
+      - label=disable
     env_file: ${AREDEV_CONFIG_ROOT:-.}/config/db.env
     volumes:
       - database:/var/lib/mysql
@@ -34,6 +37,8 @@ services:
     container_name: aredevgrafana
     hostname: grafana
     image: docker.io/grafana/grafana:13.1.1
+    security_opt:
+      - label=disable
     depends_on:
       - influxdb
     environment:
@@ -66,6 +71,8 @@ services:
     container_name: aredevnwserver
     hostname: nwserver
     image: ${NWSERVER_IMAGE:-docker.io/dmhoodoo/aredevnwnxserver:latest}
+    security_opt:
+      - label=disable
     env_file: ${AREDEV_CONFIG_ROOT:-.}/config/nwserver.env
     depends_on:
       - db
@@ -85,12 +92,16 @@ services:
         source: ${AREDEV_HOST_ROOT:-.}/server
         target: /nwn/home
       - type: bind
+        source: ${AREDEV_NWN_HOME_ROOT:-${NWN_HOME_PATH:-./server}}
+        target: ${AREDEV_NWN_HOME_MOUNT_TARGET:-/nwn/aredev-host-home}
+        read_only: true
+      - type: bind
         source: ${AREDEV_NWN_HOME_ROOT:-${NWN_HOME_PATH:-./server}}/hak
-        target: /nwn/home/hak
+        target: ${AREDEV_NWN_CONTENT_MOUNT_ROOT:-/nwn/home}/hak
         read_only: true
       - type: bind
         source: ${AREDEV_NWN_HOME_ROOT:-${NWN_HOME_PATH:-./server}}/tlk
-        target: /nwn/home/tlk
+        target: ${AREDEV_NWN_CONTENT_MOUNT_ROOT:-/nwn/home}/tlk
         read_only: true
       - type: bind
         source: ${AREDEV_HOST_ROOT:-.}/are-resources/ruby
@@ -110,6 +121,8 @@ services:
     container_name: aredevbuilder
     hostname: builder
     image: ${BUILDER_IMAGE:-docker.io/kalopsiadev/arebuilder:latest}
+    security_opt:
+      - label=disable
     user: "1000:1000"
     working_dir: /var/builder
     env_file: ${AREDEV_CONFIG_ROOT:-.}/config/arebuilder.env
