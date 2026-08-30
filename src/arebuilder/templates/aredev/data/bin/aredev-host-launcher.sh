@@ -84,6 +84,7 @@ load_aredev_config() {
     NWN_INSTALL_PATH=${NWN_INSTALL_PATH:-$ENV_NWN_INSTALL_PATH}
     NWN_HOME_PATH=${NWN_HOME_PATH:-$ENV_NWN_HOME_PATH}
     NWN_HOME_PATH=${NWN_HOME_PATH:-$AREDEV_ROOT/server}
+    NWN_LAUNCHER_PATH=${NWN_LAUNCHER_PATH:-}
     DOCKER_EXECUTABLE=${DOCKER_EXECUTABLE:-$ENV_DOCKER_EXECUTABLE}
 }
 
@@ -94,7 +95,7 @@ resolve_aredev_path() {
     path=$1
     case "$path" in
         "~") path=$HOME ;;
-        "~/"*) path=$HOME/${path#~/} ;;
+        "~/"*) path=$HOME/${path#\~/} ;;
         /*) ;;
         *) path=$AREDEV_ROOT/$path ;;
     esac
@@ -609,17 +610,28 @@ launch_nwn() {
     port=$3
     password=$4
 
-    if client=$(find_nwn_client "$NWN_INSTALL_ROOT"); then
-        client_dir=$(dirname "$client")
-        if [ "$mode" = "dm" ]; then
-            (cd "$client_dir" && "$client" -dmc +connect "127.0.0.1:$port" +password "$password") >/dev/null 2>&1 &
-        else
-            (cd "$client_dir" && "$client" +connect "127.0.0.1:$port" +password "$password") >/dev/null 2>&1 &
+    if [ -n "${NWN_LAUNCHER_PATH:-}" ]; then
+        client=$(resolve_aredev_path "$NWN_LAUNCHER_PATH")
+        if [ ! -f "$client" ]; then
+            write_error "$response_path" "NWN_LAUNCHER_PATH must point to a file: $client"
+            return
         fi
-        write_ok "$response_path"
-    else
+        if [ ! -x "$client" ]; then
+            write_error "$response_path" "NWN_LAUNCHER_PATH is not executable: $client"
+            return
+        fi
+    elif ! client=$(find_nwn_client "$NWN_INSTALL_ROOT"); then
         write_error "$response_path" "Unable to find the NWN client executable under $NWN_INSTALL_ROOT."
+        return
     fi
+
+    client_dir=$(dirname "$client")
+    if [ "$mode" = "dm" ]; then
+        (cd "$client_dir" && "$client" -dmc +connect "127.0.0.1:$port" +password "$password") >/dev/null 2>&1 &
+    else
+        (cd "$client_dir" && "$client" +connect "127.0.0.1:$port" +password "$password") >/dev/null 2>&1 &
+    fi
+    write_ok "$response_path"
 }
 
 process_request() {
@@ -679,6 +691,7 @@ run_bridge_loop() {
     set_project_paths "$project_root"
     if [ "$#" -eq 2 ]; then
         NWN_INSTALL_ROOT=$2
+        load_aredev_config
     else
         resolve_docker_runtime_paths
     fi

@@ -7,8 +7,10 @@ from arebuilder.app.aredev import AREDevController
 from arebuilder.app.aredev.project import ProjectLayout, load_arebuilder_env
 from arebuilder.app.aredev.scaffold import initialize_aredev_project
 from arebuilder.tests.app.aredev.helpers import (
+    DM_PASSWORD,
     FAKE_HOST_NWN_HOME_ROOT,
     FAKE_HOST_ROOT,
+    PLAYER_PASSWORD,
     FakeRunner,
     create_resource_dirs,
     make_controller,
@@ -464,6 +466,71 @@ def test_build_refuses_to_replace_non_empty_hak_dir(tmp_path: Path) -> None:
 
     assert build_calls == []
     assert any("non-empty directory" in message for message in output)
+
+
+@pytest.mark.parametrize("mode", [[], ["dm"]], ids=["player", "dm"])
+def test_nwn_launcher_override_preserves_connection_arguments(
+    tmp_path: Path,
+    mode: list[str],
+) -> None:
+    """Use the configured launcher without requiring a discoverable NWN binary."""
+
+    controller, layout, _, runner = make_controller(
+        tmp_path,
+        runner=FakeRunner(running="aredevnwserver\n"),
+        nwn_install=tmp_path / "missing-install",
+    )
+    write_nwn_passwords(layout)
+    launcher = _create_executable(layout.root / "custom launcher")
+    _append_arebuilder_env(layout, f'NWN_LAUNCHER_PATH="{launcher.name}"')
+    controller.config = load_arebuilder_env(layout.root)
+
+    assert controller.run("nwn", mode) == 0
+
+    launch_args = runner.calls[-1]
+    assert Path(launch_args[0]).resolve() == launcher
+    assert launch_args[1:] == [
+        *(["-dmc"] if mode else []),
+        "+connect",
+        "127.0.0.1:5121",
+        "+password",
+        DM_PASSWORD if mode else PLAYER_PASSWORD,
+    ]
+    assert runner.cwd[-1].resolve() == launcher.parent
+    assert runner.detached[-1] is True
+
+
+@pytest.mark.parametrize("invalid_kind", ["missing", "non-executable"])
+def test_nwn_rejects_invalid_launcher_without_falling_back(
+    tmp_path: Path,
+    invalid_kind: str,
+) -> None:
+    """Report a bad override even when the install has a usable default client."""
+
+    if invalid_kind == "non-executable" and sys.platform == "win32":
+        pytest.skip("POSIX executable permissions")
+    output: list[str] = []
+    install = tmp_path / "install"
+    (install / "bin" / "linux-x86").mkdir(parents=True)
+    _create_executable(install / "bin" / "linux-x86" / "nwmain")
+    controller, layout, _, runner = make_controller(
+        tmp_path,
+        runner=FakeRunner(running="aredevnwserver\n"),
+        nwn_install=install,
+        output=output.append,
+    )
+    launcher = layout.root / "bad-launcher"
+    if invalid_kind == "non-executable":
+        launcher.write_text("#!/bin/sh\n", encoding="utf-8")
+        launcher.chmod(0o644)
+    _append_arebuilder_env(layout, f'NWN_LAUNCHER_PATH="{launcher}"')
+    controller.config = load_arebuilder_env(layout.root)
+
+    assert controller.run("nwn", []) == 1
+
+    assert all(call[0] == "docker" for call in runner.calls)
+    assert any("NWN_LAUNCHER_PATH" in message for message in output)
+    assert any(str(launcher) in message for message in output)
 
 
 def test_nwn_launches_client_from_detected_install_variant(

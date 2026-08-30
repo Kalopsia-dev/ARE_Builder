@@ -56,6 +56,7 @@ from arebuilder.builder.symlinks import (
     apply_symlink_plan,
     count_symlink_plan_steps,
 )
+from arebuilder.config.env import expand_path
 from arebuilder.config.paths import find_nwn_client_executable
 from arebuilder.config.runtime import BuildModule
 
@@ -690,7 +691,11 @@ class AREDevController:
             )
             return self._report_process_failure(result)
 
-        client_args = self._client_command()
+        try:
+            client_args = self._client_command()
+        except BuilderConfigError as exc:
+            self.output(str(exc))
+            return 1
         if not client_args:
             self.output(
                 "Unable to find the NWN client executable. Set NWN_INSTALL_PATH "
@@ -701,14 +706,18 @@ class AREDevController:
         connection_args = ["+connect", f"127.0.0.1:{port}", "+password", password]
         if args == ["dm"]:
             connection_args.insert(0, "-dmc")
-        result = self.process_runner(
-            [*client_args, *connection_args],
-            cwd=Path(client_args[0]).parent,
-            env=os.environ.copy(),
-            capture_output=False,
-            background=True,
-            detach=True,
-        )
+        try:
+            result = self.process_runner(
+                [*client_args, *connection_args],
+                cwd=Path(client_args[0]).parent,
+                env=os.environ.copy(),
+                capture_output=False,
+                background=True,
+                detach=True,
+            )
+        except OSError as exc:
+            self.output(f"Unable to launch NWN client {client_args[0]}: {exc}")
+            return 1
         return self._report_process_failure(result)
 
     def toolset(self, args: list[str]) -> int:
@@ -1039,6 +1048,19 @@ class AREDevController:
 
     def _client_command(self) -> list[str]:
         """Return the host NWN client executable command, if it can be found."""
+
+        launcher_path = self.config.nwn_launcher_path.strip()
+        if launcher_path:
+            client = self.layout.root / expand_path(launcher_path)
+            if not client.is_file():
+                raise BuilderConfigError(
+                    f"NWN_LAUNCHER_PATH must point to a file: {client}"
+                )
+            if os.name != "nt" and not os.access(client, os.X_OK):
+                raise BuilderConfigError(
+                    f"NWN_LAUNCHER_PATH is not executable: {client}"
+                )
+            return [str(client)]
 
         nwn_root = self.config.nwn_install_root
         if nwn_root is None:

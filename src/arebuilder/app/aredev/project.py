@@ -61,6 +61,7 @@ class BuilderConfig:
     nwn_install_path: str = ""
     nwn_home_path: str = ""
     docker_executable: str = ""
+    nwn_launcher_path: str = ""
 
     @property
     def module_name(self) -> str:
@@ -303,6 +304,7 @@ def render_arebuilder_env(
     nwn_install_path: str | None = None,
     nwn_home_path: str | None = None,
     docker_executable: str | None = None,
+    nwn_launcher_path: str = "",
     system: str | None = None,
 ) -> str:
     """Render a project-local AREDev env file with concrete values."""
@@ -320,6 +322,7 @@ def render_arebuilder_env(
             "NWN_HOME_PATH": nwn_home_path
             if nwn_home_path is not None
             else inferred_paths.nwn_home_path,
+            "NWN_LAUNCHER_PATH": nwn_launcher_path,
             "DOCKER_EXECUTABLE": docker_executable
             if docker_executable is not None
             else inferred_paths.docker_executable,
@@ -372,6 +375,7 @@ def _build_config(values: dict[str, str]) -> BuilderConfig:
         nwserver_image=values.get("NWSERVER_IMAGE", defaults.nwserver_image),
         nwn_install_path=values.get("NWN_INSTALL_PATH", defaults.nwn_install_path),
         nwn_home_path=values.get("NWN_HOME_PATH", defaults.nwn_home_path),
+        nwn_launcher_path=values.get("NWN_LAUNCHER_PATH", defaults.nwn_launcher_path),
         docker_executable=values.get(
             "DOCKER_EXECUTABLE",
             defaults.docker_executable,
@@ -388,7 +392,12 @@ def _template_config_values() -> dict[str, str]:
 def _render_arebuilder_env_template(values: dict[str, str]) -> str:
     """Render the packaged env template with selected concrete init values."""
 
-    path_like_keys = {"NWN_INSTALL_PATH", "NWN_HOME_PATH", "DOCKER_EXECUTABLE"}
+    path_like_keys = {
+        "NWN_INSTALL_PATH",
+        "NWN_HOME_PATH",
+        "NWN_LAUNCHER_PATH",
+        "DOCKER_EXECUTABLE",
+    }
     missing_keys = set(values)
     rendered_lines: list[str] = []
     for line in _read_arebuilder_env_template().splitlines():

@@ -27,6 +27,7 @@ def test_load_arebuilder_env_parses_defaults_and_overrides(tmp_path: Path) -> No
         AREBUILDER_REPO=https://example.invalid/ARE_Builder.git
         NWSERVER_IMAGE=custom/nwserver:dev
         NWN_INSTALL_PATH="{install_root}"
+        NWN_LAUNCHER_PATH="scripts/custom launcher"
         DOCKER_EXECUTABLE="{tmp_path / "start-docker"}"
         """,
         encoding="utf-8",
@@ -40,6 +41,7 @@ def test_load_arebuilder_env_parses_defaults_and_overrides(tmp_path: Path) -> No
     assert config.arebuilder_repo == "https://example.invalid/ARE_Builder.git"
     assert config.nwserver_image == "custom/nwserver:dev"
     assert config.nwn_install_root == install_root
+    assert config.nwn_launcher_path == "scripts/custom launcher"
     assert config.docker_executable_path == tmp_path / "start-docker"
 
 
@@ -60,6 +62,20 @@ def test_render_arebuilder_env_populates_inferred_nwn_install_path(monkeypatch) 
     assert f"AREBUILDER_REPO={DEFAULT_AREBUILDER_REPO}\n" in arebuilder_env
     assert "NWN_INSTALL_PATH=/synthetic/nwn-install\n" in arebuilder_env
     assert "NWN_HOME_PATH=/synthetic/nwn-home\n" in arebuilder_env
+    assert "NWN_LAUNCHER_PATH=\n" in arebuilder_env
+
+
+def test_render_arebuilder_env_quotes_launcher_path(tmp_path: Path) -> None:
+    """Round-trip a custom launcher path containing spaces."""
+
+    launcher = tmp_path / "custom launcher"
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    rendered = render_arebuilder_env(nwn_launcher_path=str(launcher))
+    (config_dir / "arebuilder.env").write_text(rendered, encoding="utf-8")
+
+    assert f'NWN_LAUNCHER_PATH="{launcher}"\n' in rendered
+    assert load_arebuilder_env(tmp_path).nwn_launcher_path == str(launcher)
 
 
 def test_render_arebuilder_env_populates_detected_docker_starter(

@@ -2,6 +2,7 @@ import json
 import os
 import shutil
 import subprocess
+import time
 from importlib import resources
 from pathlib import Path
 
@@ -247,6 +248,100 @@ def test_init_creates_expected_scaffold_without_resource_artifacts(
         project / "data" / "bin" / "aredev-host-launcher.sh",
         os.X_OK,
     )
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX host launcher")
+@pytest.mark.parametrize(
+    ("mode", "launcher_state"),
+    [
+        ("player", "valid"),
+        ("dm", "valid"),
+        ("player", "missing"),
+        ("player", "non-executable"),
+    ],
+)
+def test_posix_host_bridge_nwn_launcher(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+    launcher_state: str,
+) -> None:
+    """Exercise actual bridge requests without Docker or the game installed."""
+
+    _pretend_host_platform(monkeypatch, "linux")
+    project = tmp_path / "AREDev"
+    initialize_aredev_project(project)
+    client = project / "launchers" / "custom launcher"
+    client.parent.mkdir()
+    client.write_text(
+        '#!/bin/sh\nprintf "%s\\n" "$PWD" "$@" > "$LAUNCH_LOG"\n',
+        encoding="utf-8",
+    )
+    client.chmod(0o755)
+    install = tmp_path / "install"
+    install.mkdir()
+    configured_path = str(client)
+    invalid = launcher_state != "valid"
+    if launcher_state == "missing":
+        configured_path = str(project / "missing-launcher")
+    elif launcher_state == "non-executable":
+        client.chmod(0o644)
+    config = project / "config" / "arebuilder.env"
+    config.write_text(f'NWN_LAUNCHER_PATH="{configured_path}"\n', encoding="utf-8")
+    commands = project / "temp" / "host-commands"
+    commands.mkdir(parents=True)
+    (commands / "launch.request").write_text(
+        f"COMMAND\tnwn\nMODE\t{mode}\nPORT\t5129\nPASSWORD\tspace ; $literal\n",
+        encoding="utf-8",
+    )
+    launch_log = tmp_path / "launch.log"
+    process = subprocess.Popen(
+        [
+            "sh",
+            str(project / "data" / "bin" / "aredev-host-launcher.sh"),
+            "bridge",
+            str(project),
+            str(install),
+        ],
+        env={**os.environ, "LAUNCH_LOG": str(launch_log)},
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    response = commands / "launch.response"
+    try:
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            if response.exists() and (invalid or launch_log.exists()):
+                break
+            if process.poll() is not None:
+                break
+            time.sleep(0.02)
+    finally:
+        (commands / "stop").touch()
+        try:
+            stdout, stderr = process.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.communicate()
+            raise
+
+    assert process.returncode == 0, stdout + stderr
+    response_text = response.read_text(encoding="utf-8")
+    if invalid:
+        assert "STATUS\terror" in response_text
+        assert "NWN_LAUNCHER_PATH" in response_text
+        assert not launch_log.exists()
+    else:
+        assert "STATUS\tok" in response_text
+        assert launch_log.read_text(encoding="utf-8").splitlines() == [
+            str(client.parent),
+            *(["-dmc"] if mode == "dm" else []),
+            "+connect",
+            "127.0.0.1:5129",
+            "+password",
+            "space ; $literal",
+        ]
 
 
 def test_init_generates_profiler_dashboard_assets(
@@ -600,6 +695,7 @@ def test_init_generates_windows_batch_wrapper_without_shell_wrapper(
     assert "docker compose --progress quiet" in powershell_launcher
     assert "down --timeout 1" in powershell_launcher
     assert "-WorkingDirectory (Split-Path -Parent $client)" in powershell_launcher
+    assert '$launcherPath = $config["NWN_LAUNCHER_PATH"]' in powershell_launcher
 
 
 def test_init_generates_posix_shell_launcher_on_macos(

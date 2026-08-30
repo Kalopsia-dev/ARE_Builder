@@ -604,7 +604,17 @@ function Invoke-NwnRequest {
     $port = if ($Values.ContainsKey("PORT")) { $Values["PORT"] } else { "5121" }
     $password = if ($Values.ContainsKey("PASSWORD")) { $Values["PASSWORD"] } else { "aredev" }
 
-    $client = Find-NwnClient -InstallRoot $script:NwnInstallRootPath
+    $config = Read-AredevConfig
+    $launcherPath = $config["NWN_LAUNCHER_PATH"]
+    if (-not [string]::IsNullOrWhiteSpace($launcherPath)) {
+        $client = Resolve-AredevPath $launcherPath
+        if (-not (Test-Path -LiteralPath $client -PathType Leaf)) {
+            throw "NWN_LAUNCHER_PATH must point to a file: $client"
+        }
+    }
+    else {
+        $client = Find-NwnClient -InstallRoot $script:NwnInstallRootPath
+    }
     if (-not $client) {
         Write-LauncherResponse `
             -ResponsePath $ResponsePath `
