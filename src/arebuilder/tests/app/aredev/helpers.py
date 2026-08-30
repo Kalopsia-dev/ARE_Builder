@@ -42,6 +42,8 @@ class FakeRunner:
                 status = self.docker_info[0]
             stderr = "Docker is not ready." if status else ""
             return ProcessResult(status, stderr=stderr)
+        if args[0] == "podman":
+            raise FileNotFoundError("podman")
         if list(args[:3]) == ["docker", "ps", "--format"]:
             return ProcessResult(0, stdout=self.running)
         if list(args[:4]) == ["docker", "volume", "ls", "--format"]:
@@ -86,7 +88,7 @@ def make_controller(
     resolved_nwn_home = nwn_home or tmp_path / "nwn-home"
     (resolved_nwn_home / "hak").mkdir(parents=True)
     (resolved_nwn_home / "tlk").mkdir(parents=True)
-    extra_env = f"NWN_HOME_PATH={resolved_nwn_home}\n"
+    extra_env = f"NWN_HOME_PATH={resolved_nwn_home}\nDOCKER_EXECUTABLE=\n"
     if nwn_install is not None:
         extra_env += f"NWN_INSTALL_PATH={nwn_install}\n"
     layout.arebuilder_env_path.write_text(

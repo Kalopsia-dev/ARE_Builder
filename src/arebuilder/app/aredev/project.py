@@ -1,3 +1,4 @@
+import platform
 from dataclasses import dataclass
 from importlib import resources
 from pathlib import Path
@@ -56,8 +57,8 @@ class BuilderConfig:
     build_target: str = "pgcc"
     builder_backend: BuilderBackend = "native"
     arebuilder_repo: str = DEFAULT_AREBUILDER_REPO
-    builder_image: str = "kalopsiadev/arebuilder:latest"
-    nwserver_image: str = "dmhoodoo/aredevnwnxserver:latest"
+    builder_image: str = "docker.io/kalopsiadev/arebuilder:latest"
+    nwserver_image: str = "docker.io/dmhoodoo/aredevnwnxserver:latest"
     nwn_install_path: str = ""
     nwn_home_path: str = ""
     docker_executable: str = ""
@@ -256,10 +257,11 @@ def load_arebuilder_env(root: Path | str) -> BuilderConfig:
 def infer_project_paths(system: str | None = None) -> InferredProjectPaths:
     """Return inferred NWN paths and warnings for missing required paths."""
 
+    host_system = system or platform.system()
     warnings: list[str] = []
-    nwn_install_root = resolve_nwn_install_root(system=system)
-    nwn_home_root = resolve_nwn_home_root(system=system)
-    docker_executable = resolve_docker_executable(system=system)
+    nwn_install_root = resolve_nwn_install_root(system=host_system)
+    nwn_home_root = resolve_nwn_home_root(system=host_system)
+    docker_executable = resolve_docker_executable(system=host_system)
 
     if nwn_install_root is None:
         # Scaffolding should still complete when detection fails; the generated
@@ -279,7 +281,7 @@ def infer_project_paths(system: str | None = None) -> InferredProjectPaths:
             f"config/{AREBUILDER_ENV_FILENAME} if you want generated HAK and "
             "TLK content linked into the game client."
         )
-    if not docker_executable:
+    if not docker_executable and host_system != "Linux":
         warnings.append(
             "I: Unable to infer DOCKER_EXECUTABLE. "
             f"{DOCKER_EXECUTABLE_DESCRIPTION} Set it in "

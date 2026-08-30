@@ -187,7 +187,12 @@ def test_init_creates_expected_scaffold_without_resource_artifacts(
         arebuilder_env["AREBUILDER_REPO"]
         == "https://github.com/Kalopsia-dev/ARE_Builder.git"
     )
-    assert arebuilder_env["NWSERVER_IMAGE"] == "dmhoodoo/aredevnwnxserver:latest"
+    assert arebuilder_env["BUILDER_IMAGE"] == (
+        "docker.io/kalopsiadev/arebuilder:latest"
+    )
+    assert arebuilder_env["NWSERVER_IMAGE"] == (
+        "docker.io/dmhoodoo/aredevnwnxserver:latest"
+    )
     assert "DOCKER_EXECUTABLE" in arebuilder_env
     env_template = resources.files("arebuilder").joinpath(
         "templates", "aredev", "config", "arebuilder.env"
@@ -199,6 +204,14 @@ def test_init_creates_expected_scaffold_without_resource_artifacts(
     assert "AREDEV_CONFIG_ROOT" in compose_text
     assert "AREDEV_NWN_INSTALL_ROOT" in compose_text
     assert "AREDEV_HOST_LAUNCHER" in compose_text
+    for image in (
+        "docker.io/library/mariadb:10",
+        "docker.io/library/influxdb:1.12.4",
+        "docker.io/grafana/grafana:13.1.1",
+        "docker.io/dmhoodoo/aredevnwnxserver:latest",
+        "docker.io/kalopsiadev/arebuilder:latest",
+    ):
+        assert image in compose_text
     _assert_compose_uses_minimal_builder_mounts(compose_text)
 
     assert not (project / "are-resources").exists()
@@ -229,7 +242,6 @@ def test_init_creates_expected_scaffold_without_resource_artifacts(
     assert "resolve_docker_runtime_paths" in shell_launcher
     assert "ensure_docker_ready" in shell_launcher
     assert "DOCKER_EXECUTABLE" in shell_launcher
-    assert "docker info" in shell_launcher
     assert "nohup" in shell_launcher
     assert "run_bridge_loop" in shell_launcher
     assert "run_update_session" in shell_launcher
@@ -238,7 +250,6 @@ def test_init_creates_expected_scaffold_without_resource_artifacts(
     assert 'update) run_update_session "$@"' in shell_launcher
     assert '"$launcher" bridge "$AREDEV_ROOT" &' in shell_launcher
     assert "--ignore-pull-failures" in shell_launcher
-    assert "docker compose --progress quiet" in shell_launcher
     assert "down --timeout 1" in shell_launcher
     assert "sleep 0.25" in shell_launcher
     assert 'client_dir=$(dirname "$client")' in shell_launcher
@@ -342,6 +353,107 @@ def test_posix_host_bridge_nwn_launcher(
             "+password",
             "space ; $literal",
         ]
+
+
+def test_linux_host_launcher_uses_podman_when_docker_is_unhealthy(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """Verify a broken Docker installation does not mask working Podman."""
+
+    _pretend_host_platform(monkeypatch, "linux")
+    project = tmp_path / "AREDev"
+    initialize_aredev_project(project)
+    nwn_install = tmp_path / "nwn-install"
+    nwn_home = tmp_path / "nwn-home"
+    nwn_install.mkdir()
+    nwn_home.mkdir()
+    config_path = project / "config" / "arebuilder.env"
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8")
+        + (
+            f"\nNWN_INSTALL_PATH={nwn_install}\n"
+            f"NWN_HOME_PATH={nwn_home}\n"
+            "DOCKER_EXECUTABLE=\n"
+        ),
+        encoding="utf-8",
+    )
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    runtime_log = tmp_path / "runtime.log"
+    docker = fake_bin / "docker"
+    docker.write_text(
+        '#!/bin/sh\nprintf "docker %s\\n" "$*" >> "$RUNTIME_LOG"\nexit 1\n',
+        encoding="utf-8",
+    )
+    docker.chmod(0o755)
+    podman = fake_bin / "podman"
+    podman.write_text(
+        '#!/bin/sh\nprintf "podman %s|%s|%s\\n" "$*" "${PODMAN_COMPOSE_PROVIDER:-}" "${PODMAN_COMPOSE_WARNING_LOGS:-}" >> "$RUNTIME_LOG"\n',
+        encoding="utf-8",
+    )
+    podman.chmod(0o755)
+    podman_compose = fake_bin / "podman-compose"
+    podman_compose.write_text("#!/bin/sh\n", encoding="utf-8")
+    podman_compose.chmod(0o755)
+    for command in ("mkdir", "rm", "rmdir", "uname"):
+        executable = shutil.which(command)
+        assert executable is not None
+        (fake_bin / command).symlink_to(executable)
+
+    shell = shutil.which("sh")
+    assert shell is not None
+    completed = subprocess.run(
+        [
+            shell,
+            str(project / "data" / "bin" / "aredev-host-launcher.sh"),
+            "prepare",
+            str(project),
+        ],
+        env={
+            **os.environ,
+            "PATH": str(fake_bin),
+            "RUNTIME_LOG": str(runtime_log),
+        },
+        text=True,
+        capture_output=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+
+    updated = subprocess.run(
+        [
+            shell,
+            str(project / "data" / "bin" / "aredev-host-launcher.sh"),
+            "update",
+            str(project),
+        ],
+        env={
+            **os.environ,
+            "PATH": str(fake_bin),
+            "RUNTIME_LOG": str(runtime_log),
+        },
+        text=True,
+        capture_output=True,
+    )
+
+    assert updated.returncode == 0, updated.stderr
+    assert runtime_log.read_text(encoding="utf-8").splitlines() == [
+        "docker info",
+        "podman info||",
+        "docker info",
+        "podman info||",
+        (
+            f"podman compose --env-file {config_path} -p aredev down"
+            f"|{podman_compose}|false"
+        ),
+        (
+            "podman compose --env-file "
+            f"{config_path} -p aredev pull --ignore-pull-failures"
+            f"|{podman_compose}|false"
+        ),
+    ]
 
 
 def test_init_generates_profiler_dashboard_assets(
@@ -466,7 +578,7 @@ def test_init_configures_profiler_monitoring_services(
     influxdb = _compose_service_block(compose_text, "influxdb")
     grafana = _compose_service_block(compose_text, "grafana")
     nwserver = _compose_service_block(compose_text, "nwserver")
-    assert "image: influxdb:1.12.4" in influxdb
+    assert "image: docker.io/library/influxdb:1.12.4" in influxdb
     assert "INFLUXDB_DB: nwn" in influxdb
     assert 'INFLUXDB_UDP_ENABLED: "true"' in influxdb
     assert 'INFLUXDB_UDP_BIND_ADDRESS: ":8089"' in influxdb
@@ -474,7 +586,7 @@ def test_init_configures_profiler_monitoring_services(
     assert 'INFLUXDB_REPORTING_DISABLED: "true"' in influxdb
     assert "- profiler_influxdb:/var/lib/influxdb" in influxdb
     assert "ports:" not in influxdb
-    assert "image: grafana/grafana:13.1.1" in grafana
+    assert "image: docker.io/grafana/grafana:13.1.1" in grafana
     assert "      - influxdb" in grafana
     assert 'GF_AUTH_ANONYMOUS_ENABLED: "true"' in grafana
     assert "GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer" in grafana
@@ -838,7 +950,7 @@ def test_init_cli_and_generated_templates_smoke(tmp_path: Path, monkeypatch) -> 
     assert "AREDEV_CONFIG_ROOT=/var/builder" in shell_launcher
     assert "AREDEV_HOST_LAUNCHER=1" in shell_launcher
     assert "DOCKER_EXECUTABLE" in shell_launcher
-    assert "docker info" in shell_launcher
+    assert '"$CONTAINER_CLI" info' in shell_launcher
     assert '--project-directory "$AREDEV_ROOT"' in shell_launcher
     assert "prepare_docker_session" in shell_launcher
     assert "run_host_update" in shell_launcher

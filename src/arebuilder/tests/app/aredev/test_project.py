@@ -159,6 +159,29 @@ def test_infer_project_paths_warns_when_nwn_config_paths_are_unknown(
     )
 
 
+def test_infer_project_paths_omits_docker_starter_notice_on_linux(
+    monkeypatch,
+) -> None:
+    """Verify Linux scaffolds do not suggest an unnecessary engine starter."""
+
+    monkeypatch.setattr(
+        "arebuilder.app.aredev.project.resolve_nwn_install_root",
+        lambda **_kwargs: Path("/synthetic/nwn-install"),
+    )
+    monkeypatch.setattr(
+        "arebuilder.app.aredev.project.resolve_nwn_home_root",
+        lambda **_kwargs: Path("/synthetic/nwn-home"),
+    )
+    monkeypatch.setattr(
+        "arebuilder.app.aredev.project.resolve_docker_executable",
+        lambda **_kwargs: "",
+    )
+
+    inferred = infer_project_paths(system="Linux")
+
+    assert not any("DOCKER_EXECUTABLE" in notice for notice in inferred.warnings)
+
+
 def test_load_arebuilder_env_rejects_invalid_backend(tmp_path: Path) -> None:
     """Verify project config loading rejects unsupported builder backends."""
 

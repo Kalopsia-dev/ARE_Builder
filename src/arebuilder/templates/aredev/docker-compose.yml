@@ -4,7 +4,7 @@ services:
     # fast, while the schema/time seed files remain bind-mounted from the project.
     container_name: aredevdbserver
     hostname: db
-    image: mariadb:10
+    image: docker.io/library/mariadb:10
     env_file: ${AREDEV_CONFIG_ROOT:-.}/config/db.env
     volumes:
       - database:/var/lib/mysql
@@ -17,7 +17,7 @@ services:
     # service stays internal to the Compose network; Grafana is its only reader.
     container_name: aredevinfluxdb
     hostname: influxdb
-    image: influxdb:1.12.4
+    image: docker.io/library/influxdb:1.12.4
     environment:
       INFLUXDB_DB: nwn
       INFLUXDB_UDP_ENABLED: "true"
@@ -33,7 +33,7 @@ services:
     # generated config so a normal AREDev start is immediately usable.
     container_name: aredevgrafana
     hostname: grafana
-    image: grafana/grafana:13.1.1
+    image: docker.io/grafana/grafana:13.1.1
     depends_on:
       - influxdb
     environment:
@@ -65,7 +65,7 @@ services:
     # mounted directly from the configured NWN home.
     container_name: aredevnwserver
     hostname: nwserver
-    image: ${NWSERVER_IMAGE:-dmhoodoo/aredevnwnxserver:latest}
+    image: ${NWSERVER_IMAGE:-docker.io/dmhoodoo/aredevnwnxserver:latest}
     env_file: ${AREDEV_CONFIG_ROOT:-.}/config/nwserver.env
     depends_on:
       - db
@@ -109,7 +109,7 @@ services:
     # bind-mounted project and NWN install directories.
     container_name: aredevbuilder
     hostname: builder
-    image: ${BUILDER_IMAGE:-kalopsiadev/arebuilder:latest}
+    image: ${BUILDER_IMAGE:-docker.io/kalopsiadev/arebuilder:latest}
     user: "1000:1000"
     working_dir: /var/builder
     env_file: ${AREDEV_CONFIG_ROOT:-.}/config/arebuilder.env

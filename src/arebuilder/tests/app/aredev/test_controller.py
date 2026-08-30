@@ -1,9 +1,10 @@
+import stat
 import sys
 from pathlib import Path
 
 import pytest
 
-from arebuilder.app.aredev import AREDevController
+from arebuilder.app.aredev import AREDevController, ProcessResult
 from arebuilder.app.aredev.project import ProjectLayout, load_arebuilder_env
 from arebuilder.app.aredev.scaffold import initialize_aredev_project
 from arebuilder.tests.app.aredev.helpers import (
@@ -153,6 +154,134 @@ def test_start_links_then_starts_server_with_module_env(
     assert runner.envs[-1]["NWN_HOME_PATH"] == str(nwn_home)
 
 
+@pytest.mark.parametrize(
+    ("command", "running", "expected_output"),
+    [
+        ("start", "", ["Server started."]),
+        (
+            "stop",
+            "aredevnwserver\n",
+            ["Stopping server...", "Cleaning development folder..."],
+        ),
+    ],
+)
+def test_start_and_stop_hide_successful_compose_output(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    command: str,
+    running: str,
+    expected_output: list[str],
+) -> None:
+    """Keep successful Compose chatter out of interactive start/stop output."""
+
+    output: list[str] = []
+    fake_runner = FakeRunner(running=running)
+    controller, _, _, _ = make_controller(tmp_path, output=output.append)
+
+    def noisy_compose_runner(
+        args: list[str],
+        *,
+        cwd: Path,
+        env: dict[str, str] | None,
+        capture_output: bool,
+        background: bool,
+        detach: bool = False,
+    ) -> ProcessResult:
+        result = fake_runner(
+            args,
+            cwd=cwd,
+            env=env,
+            capture_output=capture_output,
+            background=background,
+            detach=detach,
+        )
+        if "compose" not in args:
+            return result
+        if not capture_output:
+            print("successful Compose output")
+        return ProcessResult(
+            0,
+            stdout="successful Compose output\n",
+            stderr="successful Compose warning\n",
+        )
+
+    controller.process_runner = noisy_compose_runner
+
+    assert controller.run(command, []) == 0
+
+    assert output == expected_output
+    assert capsys.readouterr().out == ""
+
+
+@pytest.mark.parametrize(
+    ("command", "running", "expected_output"),
+    [
+        ("start", "", ["Compose failed."]),
+        ("stop", "aredevnwserver\n", ["Stopping server...", "Compose failed."]),
+    ],
+)
+def test_start_and_stop_report_captured_compose_failures(
+    tmp_path: Path,
+    command: str,
+    running: str,
+    expected_output: list[str],
+) -> None:
+    """Keep genuine Compose failures visible while successful output stays quiet."""
+
+    output: list[str] = []
+    fake_runner = FakeRunner(running=running)
+    controller, _, _, _ = make_controller(tmp_path, output=output.append)
+
+    def failing_compose_runner(
+        args: list[str],
+        *,
+        cwd: Path,
+        env: dict[str, str] | None,
+        capture_output: bool,
+        background: bool,
+        detach: bool = False,
+    ) -> ProcessResult:
+        result = fake_runner(
+            args,
+            cwd=cwd,
+            env=env,
+            capture_output=capture_output,
+            background=background,
+            detach=detach,
+        )
+        if "compose" in args:
+            return ProcessResult(125, stderr="Compose failed.\n")
+        return result
+
+    controller.process_runner = failing_compose_runner
+
+    assert controller.run(command, []) == 125
+
+    assert output == expected_output
+
+
+def test_start_makes_only_database_init_files_container_readable(
+    tmp_path: Path,
+) -> None:
+    """Verify restrictive host umasks do not block MariaDB initialization."""
+
+    controller, layout, _, _ = make_controller(tmp_path)
+    schema = layout.are_resources_dir / "db_schema" / "schema_mysql.sql"
+    schema.parent.mkdir(parents=True)
+    schema.write_text("CREATE TABLE example (id INT);\n", encoding="utf-8")
+    timeinit = layout.data_dir / "timeinit.sql"
+    unrelated = layout.data_dir / "private.sql"
+    unrelated.write_text("private\n", encoding="utf-8")
+    for path in (schema, timeinit, unrelated):
+        path.chmod(0o600)
+
+    assert controller.run("start", []) == 0
+
+    assert stat.S_IMODE(schema.stat().st_mode) == 0o644
+    assert stat.S_IMODE(timeinit.stat().st_mode) == 0o644
+    assert stat.S_IMODE(unrelated.stat().st_mode) == 0o600
+
+
 def test_start_does_not_launch_configured_docker_executable_when_ready(
     tmp_path: Path,
 ) -> None:
@@ -242,7 +371,32 @@ def test_start_requires_configured_docker_executable_when_not_ready(
 
     assert build_calls == []
     assert all(call[:2] != ["docker", "compose"] for call in runner.calls)
-    assert any("DOCKER_EXECUTABLE" in line for line in output)
+    assert output == ["Docker is not ready."]
+
+
+def test_start_reports_when_no_container_cli_is_installed(tmp_path: Path) -> None:
+    """Verify runtime commands distinguish missing CLIs from a stopped engine."""
+
+    output: list[str] = []
+    controller, _, build_calls, _ = make_controller(tmp_path, output=output.append)
+
+    def missing_container_cli(
+        args,
+        *,
+        cwd,
+        env,
+        capture_output,
+        background,
+        detach=False,
+    ):
+        raise FileNotFoundError(args[0])
+
+    controller.process_runner = missing_container_cli
+
+    assert controller.run("start", []) == 1
+
+    assert build_calls == []
+    assert output == ["Neither docker nor podman was found on PATH."]
 
 
 def test_start_rejects_invalid_docker_executable(tmp_path: Path) -> None:
@@ -279,6 +433,68 @@ def test_passive_container_status_probe_does_not_start_docker(tmp_path: Path) ->
 
     assert [str(starter)] not in runner.calls
     assert ["docker", "info"] not in runner.calls
+
+
+def test_native_compile_runs_without_a_container_cli(tmp_path: Path) -> None:
+    """Verify native compilation does not require Docker or Podman on PATH."""
+
+    controller, _, build_calls, _ = make_controller(tmp_path)
+    calls: list[list[str]] = []
+
+    def missing_container_cli(
+        args,
+        *,
+        cwd,
+        env,
+        capture_output,
+        background,
+        detach=False,
+    ):
+        calls.append(list(args))
+        raise FileNotFoundError(args[0])
+
+    controller.process_runner = missing_container_cli
+
+    assert controller.run("compile", []) == 0
+
+    assert build_calls == [("compile", [], False)]
+    assert calls == [
+        ["docker", "ps", "--format", "{{.Names}}"],
+        ["podman", "ps", "--format", "{{.Names}}"],
+    ]
+
+
+def test_native_compile_falls_back_to_podman_when_docker_is_unhealthy(
+    tmp_path: Path,
+) -> None:
+    """Verify an unusable Docker CLI does not hide a working Podman runtime."""
+
+    controller, _, build_calls, _ = make_controller(tmp_path)
+    calls: list[list[str]] = []
+
+    def podman_only_runner(
+        args,
+        *,
+        cwd,
+        env,
+        capture_output,
+        background,
+        detach=False,
+    ):
+        calls.append(list(args))
+        if args[0] == "docker":
+            return ProcessResult(1, stderr="Docker daemon unavailable")
+        return ProcessResult(0, stdout="aredevnwserver\n")
+
+    controller.process_runner = podman_only_runner
+
+    assert controller.run("compile", []) == 0
+
+    assert build_calls == [("compile", [], True)]
+    assert calls == [
+        ["docker", "ps", "--format", "{{.Names}}"],
+        ["podman", "ps", "--format", "{{.Names}}"],
+    ]
 
 
 def test_docker_backend_runs_builder_through_compose(tmp_path: Path) -> None:

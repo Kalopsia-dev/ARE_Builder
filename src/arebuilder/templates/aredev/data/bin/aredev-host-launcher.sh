@@ -36,6 +36,7 @@ STOP_FILE=
 UPDATE_LOCK_DIR=
 HOST_LAUNCHER_PID=
 OWNS_UPDATE_LOCK=0
+CONTAINER_CLI=${CONTAINER_CLI:-}
 
 usage() {
     echo "Usage:" >&2
@@ -106,11 +107,29 @@ resolve_aredev_path() {
     fi
 }
 
+resolve_container_cli() {
+    # Prefer a healthy cached runtime, then probe Docker before Podman.
+    if [ -n "$CONTAINER_CLI" ] && command -v "$CONTAINER_CLI" >/dev/null 2>&1 && "$CONTAINER_CLI" info >/dev/null 2>&1; then
+        return 0
+    fi
+    for candidate in docker podman; do
+        if command -v "$candidate" >/dev/null 2>&1 && "$candidate" info >/dev/null 2>&1; then
+            CONTAINER_CLI=$candidate
+            export CONTAINER_CLI
+            return 0
+        fi
+    done
+    CONTAINER_CLI=
+    return 1
+}
+
 ensure_docker_ready() {
-    # Probe Docker itself so this stays independent of the desktop app in use.
-    docker info >/dev/null 2>&1 && return 0
+    # Probe the available CLI so daemonless Podman needs no separate starter.
+    if resolve_container_cli; then
+        return 0
+    fi
     if [ -z "${DOCKER_EXECUTABLE:-}" ]; then
-        echo "Docker is not ready. Start Docker and try again, or set DOCKER_EXECUTABLE in config/arebuilder.env." >&2
+        echo "Neither docker nor podman is available and ready." >&2
         return 1
     fi
 
@@ -136,16 +155,36 @@ ensure_docker_ready() {
     echo "Starting Docker..."
     nohup "$docker_executable" >/dev/null 2>&1 &
 
+    # A desktop starter may expose Docker after launch, so rediscover instead
+    # of remaining pinned to a previously detected but unavailable CLI.
+    CONTAINER_CLI=
     timeout=10
     elapsed=0
     while [ "$elapsed" -lt "$timeout" ]; do
         sleep 1
-        docker info >/dev/null 2>&1 && return 0
+        if resolve_container_cli; then
+            return 0
+        fi
         elapsed=$((elapsed + 1))
     done
 
     echo "Unable to start Docker. Please do so manually." >&2
     return 1
+}
+
+run_compose_cli() {
+    # --progress is a Docker Compose option and is not supported by every
+    # provider behind Podman's compose wrapper.
+    if [ "$CONTAINER_CLI" = "docker" ]; then
+        "$CONTAINER_CLI" compose --progress quiet --project-directory "$AREDEV_ROOT" "$@"
+    else
+        provider=${PODMAN_COMPOSE_PROVIDER:-$(command -v podman-compose 2>/dev/null || true)}
+        if [ -n "$provider" ]; then
+            (CDPATH= cd "$AREDEV_ROOT" && PODMAN_COMPOSE_PROVIDER=$provider PODMAN_COMPOSE_WARNING_LOGS=${PODMAN_COMPOSE_WARNING_LOGS:-false} "$CONTAINER_CLI" compose "$@")
+        else
+            (CDPATH= cd "$AREDEV_ROOT" && "$CONTAINER_CLI" compose "$@")
+        fi
+    fi
 }
 
 clear_bridge_files() {
@@ -238,10 +277,10 @@ run_host_update() {
     # pull updated images, then optionally start a fresh interactive prompt.
     echo "Updating AREDev containers..."
     set +e
-    docker compose --progress quiet --project-directory "$AREDEV_ROOT" --env-file "$CONFIG_FILE" -p "$AREDEV_PROJECT" down
+    run_compose_cli --env-file "$CONFIG_FILE" -p "$AREDEV_PROJECT" down
     down_status=$?
     if [ "$down_status" -eq 0 ]; then
-        docker compose --progress quiet --project-directory "$AREDEV_ROOT" --env-file "$CONFIG_FILE" -p "$AREDEV_PROJECT" pull --ignore-pull-failures
+        run_compose_cli --env-file "$CONFIG_FILE" -p "$AREDEV_PROJECT" pull --ignore-pull-failures
         pull_status=$?
     else
         pull_status=$down_status
@@ -271,7 +310,7 @@ run_docker_session() {
         prepare_docker_session "$AREDEV_ROOT"
         start_bridge_loop
         set +e
-        docker compose --progress quiet --project-directory "$AREDEV_ROOT" --env-file "$CONFIG_FILE" -p "$AREDEV_PROJECT" run --rm \
+        run_compose_cli --env-file "$CONFIG_FILE" -p "$AREDEV_PROJECT" run --rm \
             -e "AREDEV_HOST_ROOT=$AREDEV_ROOT" \
             -e "AREDEV_CONFIG_ROOT=/var/builder" \
             -e "AREDEV_NWN_INSTALL_ROOT=$NWN_INSTALL_ROOT" \
@@ -477,27 +516,27 @@ run_compose_action() {
     case "$action" in
         up_nwserver)
             # NWN_MODULE is only needed by the server startup action.
-            output=$(NWN_MODULE=$nwn_module docker compose --progress quiet --project-directory "$AREDEV_ROOT" --env-file "$CONFIG_FILE" -p "$AREDEV_PROJECT" up -d nwserver 2>&1)
+            output=$(NWN_MODULE=$nwn_module run_compose_cli --env-file "$CONFIG_FILE" -p "$AREDEV_PROJECT" up -d nwserver 2>&1)
             status=$?
             ;;
         down)
-            output=$(docker compose --progress quiet --project-directory "$AREDEV_ROOT" --env-file "$CONFIG_FILE" -p "$AREDEV_PROJECT" down 2>&1)
+            output=$(run_compose_cli --env-file "$CONFIG_FILE" -p "$AREDEV_PROJECT" down 2>&1)
             status=$?
             ;;
         down_timeout)
-            output=$(docker compose --progress quiet --project-directory "$AREDEV_ROOT" --env-file "$CONFIG_FILE" -p "$AREDEV_PROJECT" down --timeout 1 2>&1)
+            output=$(run_compose_cli --env-file "$CONFIG_FILE" -p "$AREDEV_PROJECT" down --timeout 1 2>&1)
             status=$?
             ;;
         down_quiet)
-            output=$(docker compose --progress quiet --project-directory "$AREDEV_ROOT" --env-file "$CONFIG_FILE" -p "$AREDEV_PROJECT" down 2>&1)
+            output=$(run_compose_cli --env-file "$CONFIG_FILE" -p "$AREDEV_PROJECT" down 2>&1)
             status=$?
             ;;
         pull)
-            output=$(docker compose --progress quiet --project-directory "$AREDEV_ROOT" --env-file "$CONFIG_FILE" -p "$AREDEV_PROJECT" pull 2>&1)
+            output=$(run_compose_cli --env-file "$CONFIG_FILE" -p "$AREDEV_PROJECT" pull 2>&1)
             status=$?
             ;;
         pull_ignore_failures)
-            output=$(docker compose --progress quiet --project-directory "$AREDEV_ROOT" --env-file "$CONFIG_FILE" -p "$AREDEV_PROJECT" pull --ignore-pull-failures 2>&1)
+            output=$(run_compose_cli --env-file "$CONFIG_FILE" -p "$AREDEV_PROJECT" pull --ignore-pull-failures 2>&1)
             status=$?
             ;;
         *)
@@ -522,7 +561,7 @@ check_container_status() {
     container_name=$2
 
     set +e
-    names=$(docker ps --format "{{.Names}}" 2>&1)
+    names=$("$CONTAINER_CLI" ps --format "{{.Names}}" 2>&1)
     status=$?
     set -e
     if [ "$status" -ne 0 ]; then
@@ -553,7 +592,7 @@ drop_database_volumes() {
     response_path=$1
 
     set +e
-    volumes=$(docker volume ls --format "{{.Name}}" 2>&1)
+    volumes=$("$CONTAINER_CLI" volume ls --format "{{.Name}}" 2>&1)
     status=$?
     set -e
     if [ "$status" -ne 0 ]; then
@@ -580,7 +619,7 @@ drop_database_volumes() {
     fi
 
     set +e
-    output=$(docker volume rm $existing 2>&1)
+    output=$("$CONTAINER_CLI" volume rm $existing 2>&1)
     status=$?
     set -e
     if [ "$status" -eq 0 ]; then
