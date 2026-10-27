@@ -1,6 +1,8 @@
 import gc
 import json
 import os
+import subprocess
+import sys
 import weakref
 from collections.abc import Callable
 from pathlib import Path
@@ -34,6 +36,194 @@ def fake_compiler_factory(resolver):
     """Provide a fake implementation used to isolate this test case."""
 
     return FakeCompiler(resolver)
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "const int VALUE = 1; void main() { int x = VALUE; }",
+        'const string MARKER = "/*";\nvoid main() { int x = 1; }',
+        'const string MARKER = "//"; void main() { int x = 1; }',
+        'const string MARKER = "\\\"/*"; void main() { int x = 1; }',
+        "const int VALUE = 1; int StartingConditional() { return VALUE; }",
+        'const string MARKER = "/*";\nint StartingConditional() { return 1; }',
+        "void/* comment */main() {}",
+    ],
+)
+def test_script_index_detects_entrypoints_outside_comments_and_strings(
+    tmp_path: Path, source: str
+) -> None:
+    """Select executable declarations regardless of line layout or string contents."""
+
+    _write_script(tmp_path / "executable.nss", source)
+    index = script_compile.ScriptIndex(tmp_path)
+
+    assert {script.name for script in index.compilable_primary_scripts()} == {
+        "executable"
+    }
+    assert {script.name for script in index.get_related({index.get("executable")})} == {
+        "executable"
+    }
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        'const string MARKER = "void main() {}";',
+        'const string MARKER = "int StartingConditional() { return 1; }";',
+        "// void main() {}\nint helper() { return 1; }",
+        "/* void main() {} */\nint helper() { return 1; }",
+        "v/* comment */oid main() {}",
+    ],
+)
+def test_script_index_ignores_entrypoint_text_in_comments_and_strings(
+    tmp_path: Path, source: str
+) -> None:
+    """Removing comments must neither expose literal text nor join separate tokens."""
+
+    _write_script(tmp_path / "library.nss", source)
+
+    assert not script_compile.ScriptIndex(tmp_path).compilable_primary_scripts()
+
+
+@pytest.mark.parametrize(
+    "directive",
+    [
+        '#include "inc_shared" // trailing comment',
+        '/* leading comment */ #include "inc_shared"',
+        '#include /* between tokens */ "inc_shared"',
+        '#include // between tokens\n "inc_shared"',
+    ],
+)
+def test_script_index_preserves_include_dependencies_when_masking_tokens(
+    tmp_path: Path, directive: str
+) -> None:
+    """String markers and comments must not hide includes or invent dependencies."""
+
+    _write_script(tmp_path / "inc_shared.nss", "int helper() { return 1; }")
+    _write_script(
+        tmp_path / "executable.nss",
+        'const string MARKER = "/* #include \\\"fake\\\" //";\n'
+        f"{directive}\nvoid main() {{ int x = helper(); }}",
+    )
+    index = script_compile.ScriptIndex(tmp_path)
+    executable = index.get("executable")
+    include = index.get("inc_shared")
+
+    assert executable is not None
+    assert include is not None
+    assert executable.include_names == {"inc_shared"}
+    assert {script.name for script in index.get_related({include})} == {"executable"}
+
+
+def test_line_commented_include_is_loaded_and_triggers_incremental_compilation(
+    tmp_path: Path,
+) -> None:
+    """Keep valid includes discoverable and rebuild their native-compiled consumers."""
+
+    script_dir = tmp_path / "scripts"
+    shared_dir = tmp_path / "shared"
+    game_scripts = tmp_path / "nwn" / "ovr"
+    script_dir.mkdir()
+    shared_dir.mkdir()
+    game_scripts.mkdir(parents=True)
+    _write_script(game_scripts / "nwscript.nss", "void PrintString(string text);")
+    include = shared_dir / "inc_shared.nss"
+    _write_script(include, "int helper() { return 1; }")
+    _write_script(
+        script_dir / "executable.nss",
+        '#include // between tokens\n "inc_shared"\nvoid main() { int x = helper(); }',
+    )
+    options = {
+        "script_dir": script_dir,
+        "include_dirs": [shared_dir],
+        "output_dir": tmp_path / "compiled",
+        "state_path": tmp_path / "state.json",
+        "nwn_root": game_scripts.parent,
+        "num_workers": 1,
+    }
+
+    assert compile_scripts(**options).compiled_count == 1
+    original = (tmp_path / "compiled" / "executable.ncs").read_bytes()
+    assert compile_scripts(**options).compiled_count == 0
+    _write_script(include, "int helper() { return 2; }")
+    assert compile_scripts(**options).compiled_count == 1
+    assert (tmp_path / "compiled" / "executable.ncs").read_bytes() != original
+
+
+@pytest.mark.parametrize("comment", ["//" + "/" * 80, "/**/ " * 40])
+def test_script_index_handles_long_comments_without_quoted_include(
+    tmp_path: Path, comment: str
+) -> None:
+    """Incomplete include directives must not trigger exponential regex backtracking."""
+
+    _write_script(tmp_path / "executable.nss", f"void main() {{}}\n#include {comment}")
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys; from pathlib import Path; "
+            "from arebuilder.nwn.compile import ScriptIndex; "
+            "script = ScriptIndex(Path(sys.argv[1])).get('executable'); "
+            "assert script is not None and script.declares_main; "
+            "assert not script.include_names",
+            str(tmp_path),
+        ],
+        env={
+            **os.environ,
+            "PYTHONPATH": str(Path(script_compile.__file__).parents[2]),
+        },
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("selector", ["all", "executable", None])
+@pytest.mark.parametrize(
+    "source",
+    [
+        "const int VALUE = 1; void main() { int x = VALUE; }",
+        'const string MARKER = "/*";\nvoid main() { int x = 1; }',
+    ],
+)
+@pytest.mark.parametrize("invalid", [False, True])
+def test_entrypoint_layouts_reach_native_compiler(
+    tmp_path: Path, selector: str | None, source: str, invalid: bool
+) -> None:
+    """Full, named, and incremental compilation must not skip executable syntax errors."""
+
+    script_dir = tmp_path / "scripts"
+    script_dir.mkdir()
+    nwn_root = tmp_path / "nwn"
+    (nwn_root / "ovr").mkdir(parents=True)
+    _write_script(nwn_root / "ovr" / "nwscript.nss", "void PrintString(string text);")
+    _write_script(script_dir / "seed.nss", "void main() {}")
+    output_dir = tmp_path / "compiled"
+    options = {
+        "script_dir": script_dir,
+        "output_dir": output_dir,
+        "state_path": tmp_path / "state.json",
+        "nwn_root": nwn_root,
+        "num_workers": 1,
+    }
+    compile_scripts(**options)
+    if invalid:
+        source = source.replace("int x = VALUE;", "int x = ;").replace(
+            "int x = 1;", "int x = ;"
+        )
+    _write_script(script_dir / "executable.nss", source)
+
+    if invalid:
+        with pytest.raises(CompileError):
+            compile_scripts(selector=selector, **options)
+        assert not (output_dir / "executable.ncs").exists()
+    else:
+        result = compile_scripts(selector=selector, **options)
+        assert result.compiled_count == (2 if selector == "all" else 1)
+        assert (output_dir / "executable.ncs").read_bytes().startswith(b"NCS V1.0")
 
 
 def test_default_compiler_reports_missing_nwscript_before_compiling(

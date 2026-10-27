@@ -4,7 +4,10 @@ services:
     # fast, while the schema/time seed files remain bind-mounted from the project.
     container_name: aredevdbserver
     hostname: db
-    image: mariadb:10
+    image: docker.io/library/mariadb:10
+    # Host development data must retain labels used by native tools and NWN.
+    security_opt:
+      - label=disable
     env_file: ${AREDEV_CONFIG_ROOT:-.}/config/db.env
     volumes:
       - database:/var/lib/mysql
@@ -12,15 +15,71 @@ services:
       - ${AREDEV_HOST_ROOT:-.}/data/timeinit.sql:/docker-entrypoint-initdb.d/timeinit.sql:ro
     restart: unless-stopped
 
+  influxdb:
+    # NWNX emits profiler samples through InfluxDB's native UDP listener. The
+    # service stays internal to the Compose network; Grafana is its only reader.
+    container_name: aredevinfluxdb
+    hostname: influxdb
+    image: docker.io/library/influxdb:1.12.4
+    environment:
+      INFLUXDB_DB: nwn
+      INFLUXDB_UDP_ENABLED: "true"
+      INFLUXDB_UDP_BIND_ADDRESS: ":8089"
+      INFLUXDB_UDP_DATABASE: nwn
+      INFLUXDB_REPORTING_DISABLED: "true"
+    volumes:
+      - profiler_influxdb:/var/lib/influxdb
+    restart: unless-stopped
+
+  grafana:
+    # Grafana is local-only. Its datasource and dashboard are provisioned from
+    # generated config so a normal AREDev start is immediately usable.
+    container_name: aredevgrafana
+    hostname: grafana
+    image: docker.io/grafana/grafana:13.1.1
+    security_opt:
+      - label=disable
+    depends_on:
+      - influxdb
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: aredev
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - profiler_grafana:/var/lib/grafana
+      - type: bind
+        source: ${AREDEV_CONFIG_ROOT:-.}/config/grafana/provisioning/datasources
+        target: /etc/grafana/provisioning/datasources
+        read_only: true
+      - type: bind
+        source: ${AREDEV_CONFIG_ROOT:-.}/config/grafana/provisioning/dashboards
+        target: /etc/grafana/provisioning/dashboards
+        read_only: true
+      - type: bind
+        source: ${AREDEV_CONFIG_ROOT:-.}/config/grafana/dashboards
+        target: /var/lib/grafana/dashboards
+        read_only: true
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3000:3000"
+
   nwserver:
     # The NWN server consumes project/server runtime content plus HAK/TLK files
     # mounted directly from the configured NWN home.
     container_name: aredevnwserver
     hostname: nwserver
-    image: ${NWSERVER_IMAGE:-dmhoodoo/aredevnwnxserver:latest}
+    image: ${NWSERVER_IMAGE:-docker.io/dmhoodoo/aredevnwnxserver:latest}
+    security_opt:
+      - label=disable
     env_file: ${AREDEV_CONFIG_ROOT:-.}/config/nwserver.env
     depends_on:
       - db
+      # AREDev starts only the nwserver target. Keeping Grafana in this
+      # dependency graph ensures the provisioned dashboard starts with it.
+      - grafana
+      - influxdb
     environment:
       - NWN_MODULE
     stdin_open: true
@@ -33,12 +92,16 @@ services:
         source: ${AREDEV_HOST_ROOT:-.}/server
         target: /nwn/home
       - type: bind
+        source: ${AREDEV_NWN_HOME_ROOT:-${NWN_HOME_PATH:-./server}}
+        target: ${AREDEV_NWN_HOME_MOUNT_TARGET:-/nwn/aredev-host-home}
+        read_only: true
+      - type: bind
         source: ${AREDEV_NWN_HOME_ROOT:-${NWN_HOME_PATH:-./server}}/hak
-        target: /nwn/home/hak
+        target: ${AREDEV_NWN_CONTENT_MOUNT_ROOT:-/nwn/home}/hak
         read_only: true
       - type: bind
         source: ${AREDEV_NWN_HOME_ROOT:-${NWN_HOME_PATH:-./server}}/tlk
-        target: /nwn/home/tlk
+        target: ${AREDEV_NWN_CONTENT_MOUNT_ROOT:-/nwn/home}/tlk
         read_only: true
       - type: bind
         source: ${AREDEV_HOST_ROOT:-.}/are-resources/ruby
@@ -57,7 +120,9 @@ services:
     # bind-mounted project and NWN install directories.
     container_name: aredevbuilder
     hostname: builder
-    image: ${BUILDER_IMAGE:-kalopsiadev/arebuilder:latest}
+    image: ${BUILDER_IMAGE:-docker.io/kalopsiadev/arebuilder:latest}
+    security_opt:
+      - label=disable
     user: "1000:1000"
     working_dir: /var/builder
     env_file: ${AREDEV_CONFIG_ROOT:-.}/config/arebuilder.env
@@ -98,4 +163,12 @@ volumes:
   database:
     driver: local
   data:
+    driver: local
+  # Profiler telemetry is intentionally isolated from the server database and
+  # may be removed independently while NWServer and InfluxDB are stopped.
+  profiler_influxdb:
+    name: aredev_profiler_influxdb
+    driver: local
+  profiler_grafana:
+    name: aredev_profiler_grafana
     driver: local

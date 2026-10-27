@@ -36,6 +36,7 @@ STOP_FILE=
 UPDATE_LOCK_DIR=
 HOST_LAUNCHER_PID=
 OWNS_UPDATE_LOCK=0
+CONTAINER_CLI=${CONTAINER_CLI:-}
 
 usage() {
     echo "Usage:" >&2
@@ -84,6 +85,7 @@ load_aredev_config() {
     NWN_INSTALL_PATH=${NWN_INSTALL_PATH:-$ENV_NWN_INSTALL_PATH}
     NWN_HOME_PATH=${NWN_HOME_PATH:-$ENV_NWN_HOME_PATH}
     NWN_HOME_PATH=${NWN_HOME_PATH:-$AREDEV_ROOT/server}
+    NWN_LAUNCHER_PATH=${NWN_LAUNCHER_PATH:-}
     DOCKER_EXECUTABLE=${DOCKER_EXECUTABLE:-$ENV_DOCKER_EXECUTABLE}
 }
 
@@ -94,22 +96,40 @@ resolve_aredev_path() {
     path=$1
     case "$path" in
         "~") path=$HOME ;;
-        "~/"*) path=$HOME/${path#~/} ;;
+        "~/"*) path=$HOME/${path#\~/} ;;
         /*) ;;
         *) path=$AREDEV_ROOT/$path ;;
     esac
     if [ -d "$path" ]; then
-        (CDPATH= cd "$path" && pwd)
+        (CDPATH= cd "$path" && pwd -P)
     else
         printf '%s\n' "$path"
     fi
 }
 
+resolve_container_cli() {
+    # Prefer a healthy cached runtime, then probe Docker before Podman.
+    if [ -n "$CONTAINER_CLI" ] && command -v "$CONTAINER_CLI" >/dev/null 2>&1 && "$CONTAINER_CLI" info >/dev/null 2>&1; then
+        return 0
+    fi
+    for candidate in docker podman; do
+        if command -v "$candidate" >/dev/null 2>&1 && "$candidate" info >/dev/null 2>&1; then
+            CONTAINER_CLI=$candidate
+            export CONTAINER_CLI
+            return 0
+        fi
+    done
+    CONTAINER_CLI=
+    return 1
+}
+
 ensure_docker_ready() {
-    # Probe Docker itself so this stays independent of the desktop app in use.
-    docker info >/dev/null 2>&1 && return 0
+    # Probe the available CLI so daemonless Podman needs no separate starter.
+    if resolve_container_cli; then
+        return 0
+    fi
     if [ -z "${DOCKER_EXECUTABLE:-}" ]; then
-        echo "Docker is not ready. Start Docker and try again, or set DOCKER_EXECUTABLE in config/arebuilder.env." >&2
+        echo "Neither docker nor podman is available and ready." >&2
         return 1
     fi
 
@@ -135,16 +155,36 @@ ensure_docker_ready() {
     echo "Starting Docker..."
     nohup "$docker_executable" >/dev/null 2>&1 &
 
+    # A desktop starter may expose Docker after launch, so rediscover instead
+    # of remaining pinned to a previously detected but unavailable CLI.
+    CONTAINER_CLI=
     timeout=10
     elapsed=0
     while [ "$elapsed" -lt "$timeout" ]; do
         sleep 1
-        docker info >/dev/null 2>&1 && return 0
+        if resolve_container_cli; then
+            return 0
+        fi
         elapsed=$((elapsed + 1))
     done
 
     echo "Unable to start Docker. Please do so manually." >&2
     return 1
+}
+
+run_compose_cli() {
+    # --progress is a Docker Compose option and is not supported by every
+    # provider behind Podman's compose wrapper.
+    if [ "$CONTAINER_CLI" = "docker" ]; then
+        "$CONTAINER_CLI" compose --progress quiet --project-directory "$AREDEV_ROOT" "$@"
+    else
+        provider=${PODMAN_COMPOSE_PROVIDER:-$(command -v podman-compose 2>/dev/null || true)}
+        if [ -n "$provider" ]; then
+            (CDPATH= cd "$AREDEV_ROOT" && PODMAN_COMPOSE_PROVIDER=$provider PODMAN_COMPOSE_WARNING_LOGS=${PODMAN_COMPOSE_WARNING_LOGS:-false} "$CONTAINER_CLI" compose "$@")
+        else
+            (CDPATH= cd "$AREDEV_ROOT" && "$CONTAINER_CLI" compose "$@")
+        fi
+    fi
 }
 
 clear_bridge_files() {
@@ -170,6 +210,19 @@ resolve_docker_runtime_paths() {
 
     NWN_INSTALL_ROOT=$(resolve_aredev_path "$NWN_INSTALL_PATH")
     AREDEV_NWN_HOME_ROOT=$(resolve_aredev_path "$NWN_HOME_PATH")
+    if [ "$(uname -s 2>/dev/null || printf 'Unknown')" = "Linux" ]; then
+        AREDEV_NWN_HOME_MOUNT_TARGET=$AREDEV_NWN_HOME_ROOT
+        export AREDEV_NWN_HOME_MOUNT_TARGET
+        if [ -L "$AREDEV_ROOT/server/hak" ] && [ -L "$AREDEV_ROOT/server/tlk" ]; then
+            AREDEV_NWN_CONTENT_MOUNT_ROOT=/nwn/aredev-direct-content
+            export AREDEV_NWN_CONTENT_MOUNT_ROOT
+        else
+            unset AREDEV_NWN_CONTENT_MOUNT_ROOT
+        fi
+    else
+        unset AREDEV_NWN_HOME_MOUNT_TARGET
+        unset AREDEV_NWN_CONTENT_MOUNT_ROOT
+    fi
 
     # These values are consumed by docker-compose.yml and also preserved inside
     # the builder container as host-path metadata for bridge operations.
@@ -237,10 +290,10 @@ run_host_update() {
     # pull updated images, then optionally start a fresh interactive prompt.
     echo "Updating AREDev containers..."
     set +e
-    docker compose --progress quiet --project-directory "$AREDEV_ROOT" --env-file "$CONFIG_FILE" -p "$AREDEV_PROJECT" down
+    run_compose_cli --env-file "$CONFIG_FILE" -p "$AREDEV_PROJECT" down
     down_status=$?
     if [ "$down_status" -eq 0 ]; then
-        docker compose --progress quiet --project-directory "$AREDEV_ROOT" --env-file "$CONFIG_FILE" -p "$AREDEV_PROJECT" pull --ignore-pull-failures
+        run_compose_cli --env-file "$CONFIG_FILE" -p "$AREDEV_PROJECT" pull --ignore-pull-failures
         pull_status=$?
     else
         pull_status=$down_status
@@ -270,7 +323,7 @@ run_docker_session() {
         prepare_docker_session "$AREDEV_ROOT"
         start_bridge_loop
         set +e
-        docker compose --progress quiet --project-directory "$AREDEV_ROOT" --env-file "$CONFIG_FILE" -p "$AREDEV_PROJECT" run --rm \
+        run_compose_cli --env-file "$CONFIG_FILE" -p "$AREDEV_PROJECT" run --rm \
             -e "AREDEV_HOST_ROOT=$AREDEV_ROOT" \
             -e "AREDEV_CONFIG_ROOT=/var/builder" \
             -e "AREDEV_NWN_INSTALL_ROOT=$NWN_INSTALL_ROOT" \
@@ -476,27 +529,27 @@ run_compose_action() {
     case "$action" in
         up_nwserver)
             # NWN_MODULE is only needed by the server startup action.
-            output=$(NWN_MODULE=$nwn_module docker compose --progress quiet --project-directory "$AREDEV_ROOT" --env-file "$CONFIG_FILE" -p "$AREDEV_PROJECT" up -d nwserver 2>&1)
+            output=$(NWN_MODULE=$nwn_module run_compose_cli --env-file "$CONFIG_FILE" -p "$AREDEV_PROJECT" up -d nwserver 2>&1)
             status=$?
             ;;
         down)
-            output=$(docker compose --progress quiet --project-directory "$AREDEV_ROOT" --env-file "$CONFIG_FILE" -p "$AREDEV_PROJECT" down 2>&1)
+            output=$(run_compose_cli --env-file "$CONFIG_FILE" -p "$AREDEV_PROJECT" down 2>&1)
             status=$?
             ;;
         down_timeout)
-            output=$(docker compose --progress quiet --project-directory "$AREDEV_ROOT" --env-file "$CONFIG_FILE" -p "$AREDEV_PROJECT" down --timeout 1 2>&1)
+            output=$(run_compose_cli --env-file "$CONFIG_FILE" -p "$AREDEV_PROJECT" down --timeout 1 2>&1)
             status=$?
             ;;
         down_quiet)
-            output=$(docker compose --progress quiet --project-directory "$AREDEV_ROOT" --env-file "$CONFIG_FILE" -p "$AREDEV_PROJECT" down 2>&1)
+            output=$(run_compose_cli --env-file "$CONFIG_FILE" -p "$AREDEV_PROJECT" down 2>&1)
             status=$?
             ;;
         pull)
-            output=$(docker compose --progress quiet --project-directory "$AREDEV_ROOT" --env-file "$CONFIG_FILE" -p "$AREDEV_PROJECT" pull 2>&1)
+            output=$(run_compose_cli --env-file "$CONFIG_FILE" -p "$AREDEV_PROJECT" pull 2>&1)
             status=$?
             ;;
         pull_ignore_failures)
-            output=$(docker compose --progress quiet --project-directory "$AREDEV_ROOT" --env-file "$CONFIG_FILE" -p "$AREDEV_PROJECT" pull --ignore-pull-failures 2>&1)
+            output=$(run_compose_cli --env-file "$CONFIG_FILE" -p "$AREDEV_PROJECT" pull --ignore-pull-failures 2>&1)
             status=$?
             ;;
         *)
@@ -521,7 +574,7 @@ check_container_status() {
     container_name=$2
 
     set +e
-    names=$(docker ps --format "{{.Names}}" 2>&1)
+    names=$("$CONTAINER_CLI" ps --format "{{.Names}}" 2>&1)
     status=$?
     set -e
     if [ "$status" -ne 0 ]; then
@@ -552,7 +605,7 @@ drop_database_volumes() {
     response_path=$1
 
     set +e
-    volumes=$(docker volume ls --format "{{.Name}}" 2>&1)
+    volumes=$("$CONTAINER_CLI" volume ls --format "{{.Name}}" 2>&1)
     status=$?
     set -e
     if [ "$status" -ne 0 ]; then
@@ -579,7 +632,7 @@ drop_database_volumes() {
     fi
 
     set +e
-    output=$(docker volume rm $existing 2>&1)
+    output=$("$CONTAINER_CLI" volume rm $existing 2>&1)
     status=$?
     set -e
     if [ "$status" -eq 0 ]; then
@@ -609,17 +662,28 @@ launch_nwn() {
     port=$3
     password=$4
 
-    if client=$(find_nwn_client "$NWN_INSTALL_ROOT"); then
-        client_dir=$(dirname "$client")
-        if [ "$mode" = "dm" ]; then
-            (cd "$client_dir" && "$client" -dmc +connect "127.0.0.1:$port" +password "$password") >/dev/null 2>&1 &
-        else
-            (cd "$client_dir" && "$client" +connect "127.0.0.1:$port" +password "$password") >/dev/null 2>&1 &
+    if [ -n "${NWN_LAUNCHER_PATH:-}" ]; then
+        client=$(resolve_aredev_path "$NWN_LAUNCHER_PATH")
+        if [ ! -f "$client" ]; then
+            write_error "$response_path" "NWN_LAUNCHER_PATH must point to a file: $client"
+            return
         fi
-        write_ok "$response_path"
-    else
+        if [ ! -x "$client" ]; then
+            write_error "$response_path" "NWN_LAUNCHER_PATH is not executable: $client"
+            return
+        fi
+    elif ! client=$(find_nwn_client "$NWN_INSTALL_ROOT"); then
         write_error "$response_path" "Unable to find the NWN client executable under $NWN_INSTALL_ROOT."
+        return
     fi
+
+    client_dir=$(dirname "$client")
+    if [ "$mode" = "dm" ]; then
+        (cd "$client_dir" && "$client" -dmc +connect "127.0.0.1:$port" +password "$password") >/dev/null 2>&1 &
+    else
+        (cd "$client_dir" && "$client" +connect "127.0.0.1:$port" +password "$password") >/dev/null 2>&1 &
+    fi
+    write_ok "$response_path"
 }
 
 process_request() {
@@ -679,6 +743,7 @@ run_bridge_loop() {
     set_project_paths "$project_root"
     if [ "$#" -eq 2 ]; then
         NWN_INSTALL_ROOT=$2
+        load_aredev_config
     else
         resolve_docker_runtime_paths
     fi

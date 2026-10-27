@@ -4,6 +4,7 @@ import json
 import os
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import threading
@@ -56,10 +57,11 @@ from arebuilder.builder.symlinks import (
     apply_symlink_plan,
     count_symlink_plan_steps,
 )
+from arebuilder.config.env import expand_path
 from arebuilder.config.paths import find_nwn_client_executable
 from arebuilder.config.runtime import BuildModule
 
-COMPOSE_ARGS = ["docker", "compose", "--progress", "quiet"]
+COMPOSE_ARGS = ["compose", "--progress", "quiet"]
 AREDEV_PROJECT = "aredev"
 SCREEN_CLEAR = "\033[H\033[2J\033[3J"
 HOST_MODULES_ENV = "AREDEV_NWN_HOME_MODULES_ROOT"
@@ -338,6 +340,7 @@ class AREDevController:
         self._server_state_cache: _ServerStateCache | None = None
         self._path_warnings_shown = False
         self._running_interactive = False
+        self._container_cli: str | None = None
 
     @classmethod
     def from_root(
@@ -601,6 +604,7 @@ class AREDevController:
         result = self._run_compose(
             ["up", "-d", "nwserver"],
             extra_env={"NWN_MODULE": self.config.module_name},
+            capture_output=True,
         )
         if result.returncode == 0:
             self.output("Server started.")
@@ -619,7 +623,8 @@ class AREDevController:
 
         self.output("Stopping server...")
         result = self._run_compose(
-            ["down", "--timeout", str(COMPOSE_STOP_TIMEOUT_SECONDS)]
+            ["down", "--timeout", str(COMPOSE_STOP_TIMEOUT_SECONDS)],
+            capture_output=True,
         )
         if result.returncode != 0:
             return self._report_process_failure(result)
@@ -690,7 +695,11 @@ class AREDevController:
             )
             return self._report_process_failure(result)
 
-        client_args = self._client_command()
+        try:
+            client_args = self._client_command()
+        except BuilderConfigError as exc:
+            self.output(str(exc))
+            return 1
         if not client_args:
             self.output(
                 "Unable to find the NWN client executable. Set NWN_INSTALL_PATH "
@@ -701,14 +710,18 @@ class AREDevController:
         connection_args = ["+connect", f"127.0.0.1:{port}", "+password", password]
         if args == ["dm"]:
             connection_args.insert(0, "-dmc")
-        result = self.process_runner(
-            [*client_args, *connection_args],
-            cwd=Path(client_args[0]).parent,
-            env=os.environ.copy(),
-            capture_output=False,
-            background=True,
-            detach=True,
-        )
+        try:
+            result = self.process_runner(
+                [*client_args, *connection_args],
+                cwd=Path(client_args[0]).parent,
+                env=os.environ.copy(),
+                capture_output=False,
+                background=True,
+                detach=True,
+            )
+        except OSError as exc:
+            self.output(f"Unable to launch NWN client {client_args[0]}: {exc}")
+            return 1
         return self._report_process_failure(result)
 
     def toolset(self, args: list[str]) -> int:
@@ -847,6 +860,23 @@ class AREDevController:
             target_path.mkdir(parents=True, exist_ok=True)
             # HAK/TLK folders may be large and shared with the user's NWN client,
             # so the project points at them instead of copying their contents.
+            if (
+                link_path.is_dir()
+                and not link_path.is_symlink()
+                and not _path_is_junction(link_path)
+                and any(link_path.iterdir())
+            ):
+                shadowed_path = link_path.with_name(f"{name}.aredev-shadowed")
+                if shadowed_path.exists() or shadowed_path.is_symlink():
+                    raise BuilderConfigError(
+                        "Unable to preserve populated directory because its backup "
+                        f"path already exists: {shadowed_path}"
+                    )
+                link_path.rename(shadowed_path)
+                self.output(
+                    f"W: Moved populated directory {link_path} to {shadowed_path} "
+                    "before linking it to the NWN home."
+                )
             _ensure_directory_symlink(link_path=link_path, target_path=target_path)
 
     def _validate_target_resources(self) -> bool:
@@ -894,8 +924,8 @@ class AREDevController:
                 self.output(result.stdout.rstrip())
             return self._report_process_failure(result)
 
-        result = self.process_runner(
-            ["docker", "volume", "ls", "--format", "{{.Name}}"],
+        result = self._run_container_command(
+            ["volume", "ls", "--format", "{{.Name}}"],
             cwd=self.layout.root,
             env=self._compose_env(),
             capture_output=True,
@@ -913,8 +943,8 @@ class AREDevController:
             self.output("Database volume not found.")
             return 0
 
-        remove_result = self.process_runner(
-            ["docker", "volume", "rm", *existing],
+        remove_result = self._run_container_command(
+            ["volume", "rm", *existing],
             cwd=self.layout.root,
             env=self._compose_env(),
             capture_output=False,
@@ -948,8 +978,8 @@ class AREDevController:
             )
             return result.returncode == 0 and result.stdout.strip() == "true"
 
-        result = self.process_runner(
-            ["docker", "ps", "--format", "{{.Names}}"],
+        result = self._run_container_command(
+            ["ps", "--format", "{{.Names}}"],
             cwd=self.layout.root,
             env=self._compose_env(),
             capture_output=True,
@@ -964,6 +994,7 @@ class AREDevController:
         args: list[str],
         *,
         extra_env: Mapping[str, str] | None = None,
+        capture_output: bool = False,
     ) -> ProcessResult:
         """Run Docker Compose locally or delegate it to the host launcher bridge."""
 
@@ -973,16 +1004,19 @@ class AREDevController:
 
         if not self._ensure_docker_ready():
             return ProcessResult(1)
-        return self.process_runner(
-            [
-                *COMPOSE_ARGS,
-                "-p",
-                AREDEV_PROJECT,
-                *args,
-            ],
+        compose_args = list(COMPOSE_ARGS)
+        compose_env = self._compose_env(extra_env)
+        if self._container_cli == "podman":
+            compose_args = ["compose"]
+            podman_compose = shutil.which("podman-compose")
+            if podman_compose:
+                compose_env.setdefault("PODMAN_COMPOSE_PROVIDER", podman_compose)
+                compose_env.setdefault("PODMAN_COMPOSE_WARNING_LOGS", "false")
+        return self._run_container_command(
+            [*compose_args, "-p", AREDEV_PROJECT, *args],
             cwd=self.layout.root,
-            env=self._compose_env(extra_env),
-            capture_output=False,
+            env=compose_env,
+            capture_output=capture_output,
             background=False,
         )
 
@@ -1001,6 +1035,8 @@ class AREDevController:
         nwn_home_path = os.environ.get("AREDEV_NWN_HOME_ROOT") or str(
             self.config.nwn_home_root or self.layout.server_dir
         )
+        if sys.platform.startswith("linux") and Path(nwn_home_path).exists():
+            nwn_home_path = str(Path(nwn_home_path).resolve())
         # Host paths stay in the environment even for containerized Python; the
         # wrapper/host launcher use them to run Docker and NWN on the host side.
         env.update(
@@ -1017,6 +1053,12 @@ class AREDevController:
                 "NWN_HOME_PATH": nwn_home_path,
             }
         )
+        if sys.platform.startswith("linux"):
+            env["AREDEV_NWN_HOME_MOUNT_TARGET"] = nwn_home_path
+            if self.layout.hak_dir.is_symlink() and self.layout.tlk_dir.is_symlink():
+                env["AREDEV_NWN_CONTENT_MOUNT_ROOT"] = "/nwn/aredev-direct-content"
+            else:
+                env.pop("AREDEV_NWN_CONTENT_MOUNT_ROOT", None)
         if extra_env:
             env.update(extra_env)
         if os.environ.get("DOCKER_HOST"):
@@ -1037,8 +1079,31 @@ class AREDevController:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(_read_aredev_template(relative_path), encoding="utf-8")
 
+        if os.name != "nt":
+            for path in (
+                self.layout.are_resources_dir / "db_schema" / "schema_mysql.sql",
+                self.layout.data_dir / "timeinit.sql",
+            ):
+                if not path.is_file():
+                    continue
+                mode = stat.S_IMODE(path.stat().st_mode)
+                path.chmod(mode | stat.S_IRGRP | stat.S_IROTH)
+
     def _client_command(self) -> list[str]:
         """Return the host NWN client executable command, if it can be found."""
+
+        launcher_path = self.config.nwn_launcher_path.strip()
+        if launcher_path:
+            client = self.layout.root / expand_path(launcher_path)
+            if not client.is_file():
+                raise BuilderConfigError(
+                    f"NWN_LAUNCHER_PATH must point to a file: {client}"
+                )
+            if os.name != "nt" and not os.access(client, os.X_OK):
+                raise BuilderConfigError(
+                    f"NWN_LAUNCHER_PATH is not executable: {client}"
+                )
+            return [str(client)]
 
         nwn_root = self.config.nwn_install_root
         if nwn_root is None:
@@ -1597,15 +1662,19 @@ class AREDevController:
         if _in_builder_container():
             return True
 
-        if self._docker_info().returncode == 0:
+        readiness = self._docker_info()
+        if readiness.returncode == 0:
             return True
 
         executable = self.config.docker_executable_path
         if executable is None:
-            self.output(
-                "Docker is not ready. Start Docker and try again, or set "
-                "DOCKER_EXECUTABLE in config/arebuilder.env."
-            )
+            if self._container_cli is None and readiness.stderr:
+                self.output(readiness.stderr)
+            else:
+                self.output(
+                    "Docker is not ready. Start Docker and try again, or set "
+                    "DOCKER_EXECUTABLE in config/arebuilder.env."
+                )
             return False
 
         if not self._validate_docker_executable(executable):
@@ -1628,6 +1697,9 @@ class AREDevController:
             self._report_process_failure(launch_result)
             return False
 
+        # Re-run Docker-first discovery after the starter has had a chance to
+        # install or expose its CLI instead of staying pinned to an older one.
+        self._container_cli = None
         deadline = time.monotonic() + DOCKER_START_TIMEOUT
         while True:
             if self._docker_info().returncode == 0:
@@ -1644,8 +1716,8 @@ class AREDevController:
         """Probe Docker engine readiness without triggering configured startup."""
 
         try:
-            return self.process_runner(
-                ["docker", "info"],
+            return self._run_container_command(
+                ["info"],
                 cwd=self.layout.root,
                 env=os.environ.copy(),
                 capture_output=True,
@@ -1653,6 +1725,49 @@ class AREDevController:
             )
         except OSError as exc:
             return ProcessResult(1, stderr=str(exc))
+
+    def _run_container_command(
+        self,
+        args: Sequence[str],
+        *,
+        cwd: Path,
+        env: Mapping[str, str] | None,
+        capture_output: bool,
+        background: bool,
+        detach: bool = False,
+    ) -> ProcessResult:
+        """Run a container command with Docker-first, Podman-second discovery."""
+
+        last_result: ProcessResult | None = None
+        candidates = [self._container_cli] if self._container_cli else []
+        candidates.extend(
+            candidate
+            for candidate in ("docker", "podman")
+            if candidate not in candidates
+        )
+        for candidate in candidates:
+            try:
+                result = self.process_runner(
+                    [candidate, *args],
+                    cwd=cwd,
+                    env=env,
+                    capture_output=capture_output,
+                    background=background,
+                    detach=detach,
+                )
+            except FileNotFoundError:
+                if self._container_cli == candidate:
+                    self._container_cli = None
+                continue
+            if result.returncode != 0 and self._container_cli is None:
+                last_result = result
+                continue
+            self._container_cli = candidate
+            return result
+
+        return last_result or ProcessResult(
+            127, stderr="Neither docker nor podman was found on PATH."
+        )
 
     def _validate_docker_executable(self, executable: Path) -> bool:
         """Return whether the configured Docker starter can be launched safely."""

@@ -1,6 +1,61 @@
 from pathlib import Path
 
-from arebuilder.content.twoda import load_2da, parse_2da_text, write_2da
+import pytest
+
+from arebuilder.content.twoda import TwoDAError, load_2da, parse_2da_text, write_2da
+
+
+@pytest.mark.parametrize(
+    ("row", "actual_count"), [("007 ENTRY", 1), ("007", 0), ("007 ENTRY 1 EXTRA", 3)]
+)
+@pytest.mark.parametrize("validate_index", [True, False])
+def test_parse_2da_rejects_wrong_cell_count_before_reindexing(
+    row: str, actual_count: int, validate_index: bool
+) -> None:
+    """Reject incomplete or oversized rows without losing their source location."""
+
+    with pytest.raises(TwoDAError) as exc_info:
+        parse_2da_text(
+            f"2DA V2.0\n\nDEFAULT: ****\n\nLabel Value\n8 FIRST 1\n\n{row}\n",
+            source_path=Path("Custom content/table.2da"),
+            validate_index=validate_index,
+        )
+
+    message = str(exc_info.value)
+    assert "Custom content/table.2da:8:" in message
+    assert "Row 007" in message
+    assert f"{actual_count} values" in message
+    assert "expected 2" in message
+
+
+def test_load_2da_rejects_missing_cells(tmp_path: Path) -> None:
+    """File loading must enforce the same strict shape checks as text parsing."""
+
+    path = tmp_path / "short.2da"
+    path.write_text("2DA V2.0\n\nLabel Value\n0 ENTRY\n", encoding="latin-1")
+
+    with pytest.raises(TwoDAError) as exc_info:
+        load_2da(path)
+
+    assert f"{path}:4:" in str(exc_info.value)
+    assert "Row 0" in str(exc_info.value)
+
+
+def test_parse_2da_preserves_explicit_cells_with_default_and_blank_lines() -> None:
+    """DEFAULT and blank lines must not change cell counts or explicit values."""
+
+    table = parse_2da_text(
+        '2DA V2.0\n\nDEFAULT: ****\n\nLabel Value\n'
+        '\n0 FRAZ-URB\'LUU ****\n\n1 "Name With Spaces" ""\n'
+        '2 ENTRY "escaped \\"quote\\" and \\\\ path"\n'
+    )
+
+    assert table.default_value == "****"
+    assert [row.values for row in table.rows] == [
+        {"Label": "FRAZ-URB'LUU", "Value": "****"},
+        {"Label": "Name With Spaces", "Value": ""},
+        {"Label": "ENTRY", "Value": 'escaped "quote" and \\ path'},
+    ]
 
 
 def test_parse_and_write_2da_preserves_quoted_values(tmp_path: Path) -> None:

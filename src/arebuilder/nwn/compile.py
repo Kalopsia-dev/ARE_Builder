@@ -76,22 +76,24 @@ class Script:
         self.hash = hash_script_contents(self.contents)
         script_index.add(self)
 
-        text = re.sub(
-            script_index.regex_comments,
-            "",
-            self.contents.decode(encoding="ISO-8859-1"),
+        self.include_names: set[str] = set()
+
+        def mask_token(match: re.Match[str]) -> str:
+            """Collect include paths and mask non-code without joining tokens."""
+
+            include_name = match.group(1)
+            if include_name is not None:
+                self.include_names.add(ScriptIndex.normalise_script_name(include_name))
+            return " "
+
+        # Consume comments, strings, and include directives together so literal
+        # comment markers cannot hide code. Only declarations remain to classify.
+        code = script_index.regex_tokens.sub(
+            mask_token, self.contents.decode(encoding="ISO-8859-1")
         )
-        # Entry-point detection is performed after comment removal because many
-        # shared include files mention main() in documentation or dead snippets.
-        self.declares_main = bool(re.search(script_index.regex_main_fns, text))
-        self.include_names = {
-            ScriptIndex.normalise_script_name(include_name)
-            for include_name in re.findall(script_index.regex_includes, text)
-        }
+        self.declares_main = bool(script_index.regex_main_fns.search(code))
         self.is_entrypoint_alias = (
-            not self.declares_main
-            and bool(self.include_names)
-            and not re.sub(script_index.regex_includes, "", text).strip()
+            not self.declares_main and bool(self.include_names) and not code.strip()
         )
         self.has_main = self.declares_main
         self.includes: set[Script] = set()
@@ -137,10 +139,15 @@ class Script:
 class ScriptIndex:
     """Index custom scripts and resolve their include relationships."""
 
-    regex_comments = re.compile(r"//[^\r\n]*|/\*[\s\S]*?(?:\*/|\Z)")
-    regex_includes = re.compile(r'^\s*#include\s+"([^"]+)"(?![^"\n]*//)', re.MULTILINE)
+    # Atomic spacing prevents incomplete includes from repeatedly splitting
+    # comment text while searching for a quoted resource name.
+    regex_tokens = re.compile(
+        r'//[^\r\n]*|/\*[\s\S]*?(?:\*/|\Z)'
+        r'|#include(?>\s+|/\*[\s\S]*?\*/|//[^\r\n]*[\r\n])+"([^"\r\n]+)"'
+        r'|"[^"\\]*(?:\\.[^"\\]*)*"'
+    )
     regex_main_fns = re.compile(
-        r"^\s*(?:void\s+main|int\s+StartingConditional)\s*\(\s*\)", re.MULTILINE
+        r"\b(?:void\s+main|int\s+StartingConditional)\s*\(\s*\)"
     )
 
     def __init__(

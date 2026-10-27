@@ -1,14 +1,17 @@
+import stat
 import sys
 from pathlib import Path
 
 import pytest
 
-from arebuilder.app.aredev import AREDevController
+from arebuilder.app.aredev import AREDevController, ProcessResult
 from arebuilder.app.aredev.project import ProjectLayout, load_arebuilder_env
 from arebuilder.app.aredev.scaffold import initialize_aredev_project
 from arebuilder.tests.app.aredev.helpers import (
+    DM_PASSWORD,
     FAKE_HOST_NWN_HOME_ROOT,
     FAKE_HOST_ROOT,
+    PLAYER_PASSWORD,
     FakeRunner,
     create_resource_dirs,
     make_controller,
@@ -151,6 +154,134 @@ def test_start_links_then_starts_server_with_module_env(
     assert runner.envs[-1]["NWN_HOME_PATH"] == str(nwn_home)
 
 
+@pytest.mark.parametrize(
+    ("command", "running", "expected_output"),
+    [
+        ("start", "", ["Server started."]),
+        (
+            "stop",
+            "aredevnwserver\n",
+            ["Stopping server...", "Cleaning development folder..."],
+        ),
+    ],
+)
+def test_start_and_stop_hide_successful_compose_output(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    command: str,
+    running: str,
+    expected_output: list[str],
+) -> None:
+    """Keep successful Compose chatter out of interactive start/stop output."""
+
+    output: list[str] = []
+    fake_runner = FakeRunner(running=running)
+    controller, _, _, _ = make_controller(tmp_path, output=output.append)
+
+    def noisy_compose_runner(
+        args: list[str],
+        *,
+        cwd: Path,
+        env: dict[str, str] | None,
+        capture_output: bool,
+        background: bool,
+        detach: bool = False,
+    ) -> ProcessResult:
+        result = fake_runner(
+            args,
+            cwd=cwd,
+            env=env,
+            capture_output=capture_output,
+            background=background,
+            detach=detach,
+        )
+        if "compose" not in args:
+            return result
+        if not capture_output:
+            print("successful Compose output")
+        return ProcessResult(
+            0,
+            stdout="successful Compose output\n",
+            stderr="successful Compose warning\n",
+        )
+
+    controller.process_runner = noisy_compose_runner
+
+    assert controller.run(command, []) == 0
+
+    assert output == expected_output
+    assert capsys.readouterr().out == ""
+
+
+@pytest.mark.parametrize(
+    ("command", "running", "expected_output"),
+    [
+        ("start", "", ["Compose failed."]),
+        ("stop", "aredevnwserver\n", ["Stopping server...", "Compose failed."]),
+    ],
+)
+def test_start_and_stop_report_captured_compose_failures(
+    tmp_path: Path,
+    command: str,
+    running: str,
+    expected_output: list[str],
+) -> None:
+    """Keep genuine Compose failures visible while successful output stays quiet."""
+
+    output: list[str] = []
+    fake_runner = FakeRunner(running=running)
+    controller, _, _, _ = make_controller(tmp_path, output=output.append)
+
+    def failing_compose_runner(
+        args: list[str],
+        *,
+        cwd: Path,
+        env: dict[str, str] | None,
+        capture_output: bool,
+        background: bool,
+        detach: bool = False,
+    ) -> ProcessResult:
+        result = fake_runner(
+            args,
+            cwd=cwd,
+            env=env,
+            capture_output=capture_output,
+            background=background,
+            detach=detach,
+        )
+        if "compose" in args:
+            return ProcessResult(125, stderr="Compose failed.\n")
+        return result
+
+    controller.process_runner = failing_compose_runner
+
+    assert controller.run(command, []) == 125
+
+    assert output == expected_output
+
+
+def test_start_makes_only_database_init_files_container_readable(
+    tmp_path: Path,
+) -> None:
+    """Verify restrictive host umasks do not block MariaDB initialization."""
+
+    controller, layout, _, _ = make_controller(tmp_path)
+    schema = layout.are_resources_dir / "db_schema" / "schema_mysql.sql"
+    schema.parent.mkdir(parents=True)
+    schema.write_text("CREATE TABLE example (id INT);\n", encoding="utf-8")
+    timeinit = layout.data_dir / "timeinit.sql"
+    unrelated = layout.data_dir / "private.sql"
+    unrelated.write_text("private\n", encoding="utf-8")
+    for path in (schema, timeinit, unrelated):
+        path.chmod(0o600)
+
+    assert controller.run("start", []) == 0
+
+    assert stat.S_IMODE(schema.stat().st_mode) == 0o644
+    assert stat.S_IMODE(timeinit.stat().st_mode) == 0o644
+    assert stat.S_IMODE(unrelated.stat().st_mode) == 0o600
+
+
 def test_start_does_not_launch_configured_docker_executable_when_ready(
     tmp_path: Path,
 ) -> None:
@@ -240,7 +371,32 @@ def test_start_requires_configured_docker_executable_when_not_ready(
 
     assert build_calls == []
     assert all(call[:2] != ["docker", "compose"] for call in runner.calls)
-    assert any("DOCKER_EXECUTABLE" in line for line in output)
+    assert output == ["Docker is not ready."]
+
+
+def test_start_reports_when_no_container_cli_is_installed(tmp_path: Path) -> None:
+    """Verify runtime commands distinguish missing CLIs from a stopped engine."""
+
+    output: list[str] = []
+    controller, _, build_calls, _ = make_controller(tmp_path, output=output.append)
+
+    def missing_container_cli(
+        args,
+        *,
+        cwd,
+        env,
+        capture_output,
+        background,
+        detach=False,
+    ):
+        raise FileNotFoundError(args[0])
+
+    controller.process_runner = missing_container_cli
+
+    assert controller.run("start", []) == 1
+
+    assert build_calls == []
+    assert output == ["Neither docker nor podman was found on PATH."]
 
 
 def test_start_rejects_invalid_docker_executable(tmp_path: Path) -> None:
@@ -277,6 +433,68 @@ def test_passive_container_status_probe_does_not_start_docker(tmp_path: Path) ->
 
     assert [str(starter)] not in runner.calls
     assert ["docker", "info"] not in runner.calls
+
+
+def test_native_compile_runs_without_a_container_cli(tmp_path: Path) -> None:
+    """Verify native compilation does not require Docker or Podman on PATH."""
+
+    controller, _, build_calls, _ = make_controller(tmp_path)
+    calls: list[list[str]] = []
+
+    def missing_container_cli(
+        args,
+        *,
+        cwd,
+        env,
+        capture_output,
+        background,
+        detach=False,
+    ):
+        calls.append(list(args))
+        raise FileNotFoundError(args[0])
+
+    controller.process_runner = missing_container_cli
+
+    assert controller.run("compile", []) == 0
+
+    assert build_calls == [("compile", [], False)]
+    assert calls == [
+        ["docker", "ps", "--format", "{{.Names}}"],
+        ["podman", "ps", "--format", "{{.Names}}"],
+    ]
+
+
+def test_native_compile_falls_back_to_podman_when_docker_is_unhealthy(
+    tmp_path: Path,
+) -> None:
+    """Verify an unusable Docker CLI does not hide a working Podman runtime."""
+
+    controller, _, build_calls, _ = make_controller(tmp_path)
+    calls: list[list[str]] = []
+
+    def podman_only_runner(
+        args,
+        *,
+        cwd,
+        env,
+        capture_output,
+        background,
+        detach=False,
+    ):
+        calls.append(list(args))
+        if args[0] == "docker":
+            return ProcessResult(1, stderr="Docker daemon unavailable")
+        return ProcessResult(0, stdout="aredevnwserver\n")
+
+    controller.process_runner = podman_only_runner
+
+    assert controller.run("compile", []) == 0
+
+    assert build_calls == [("compile", [], True)]
+    assert calls == [
+        ["docker", "ps", "--format", "{{.Names}}"],
+        ["podman", "ps", "--format", "{{.Names}}"],
+    ]
 
 
 def test_docker_backend_runs_builder_through_compose(tmp_path: Path) -> None:
@@ -317,6 +535,80 @@ def test_docker_backend_runs_builder_through_compose(tmp_path: Path) -> None:
         "all",
         "are-dev-pgcc",
     ] in runner.calls
+
+
+def test_docker_backend_uses_main_compose_file_with_podman(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify Podman uses podman-compose instead of Docker's Compose plugin."""
+
+    project = tmp_path / "AREDev"
+    initialize_aredev_project(project, backend="docker")
+    layout = ProjectLayout.from_root(project)
+    nwn_home = tmp_path / "real-nwn-home"
+    (nwn_home / "hak").mkdir(parents=True)
+    (nwn_home / "tlk").mkdir(parents=True)
+    nwn_home_alias = tmp_path / "nwn-home"
+    nwn_home_alias.symlink_to(nwn_home, target_is_directory=True)
+    layout.arebuilder_env_path.write_text(
+        layout.arebuilder_env_path.read_text(encoding="utf-8")
+        + f"NWN_HOME_PATH={nwn_home_alias}\n",
+        encoding="utf-8",
+    )
+    create_resource_dirs(layout)
+    provider = tmp_path / "bin" / "podman-compose"
+    provider.parent.mkdir()
+    _create_executable(provider)
+    monkeypatch.setenv("PATH", str(provider.parent))
+    calls: list[list[str]] = []
+    environments: list[dict[str, str]] = []
+
+    def podman_only_runner(
+        args,
+        *,
+        cwd,
+        env,
+        capture_output,
+        background,
+        detach=False,
+    ):
+        calls.append(list(args))
+        environments.append(dict(env or {}))
+        if args[0] == "docker":
+            raise FileNotFoundError(args[0])
+        return ProcessResult(0)
+
+    controller = AREDevController(
+        layout=layout,
+        config=load_arebuilder_env(project),
+        process_runner=podman_only_runner,
+        output=lambda _message: None,
+    )
+
+    assert controller.run("build", []) == 0
+
+    compose_call = next(call for call in calls if call[:2] == ["podman", "compose"])
+    assert compose_call == [
+        "podman",
+        "compose",
+        "-p",
+        "aredev",
+        "run",
+        "--rm",
+        "builder",
+        "all",
+        "are-dev-pgcc",
+    ]
+    compose_index = calls.index(compose_call)
+    assert environments[compose_index]["AREDEV_NWN_HOME_ROOT"] == str(nwn_home)
+    assert environments[compose_index]["AREDEV_NWN_HOME_MOUNT_TARGET"] == str(nwn_home)
+    assert (
+        environments[compose_index]["AREDEV_NWN_CONTENT_MOUNT_ROOT"]
+        == "/nwn/aredev-direct-content"
+    )
+    assert environments[compose_index]["PODMAN_COMPOSE_PROVIDER"] == str(provider)
+    assert environments[compose_index]["PODMAN_COMPOSE_WARNING_LOGS"] == "false"
 
 
 def test_docker_backend_inside_builder_container_reuses_current_process(
@@ -434,36 +726,117 @@ def test_interactive_prompt_runs_commands_until_exit(tmp_path: Path) -> None:
     assert any("Usage:" in message for message in output)
 
 
-def test_build_links_empty_hak_and_tlk_dirs_to_nwn_home(tmp_path: Path) -> None:
-    """Verify build links project HAK and TLK dirs to NWN home."""
+def test_build_links_project_hak_and_tlk_to_nwn_home(
+    tmp_path: Path,
+) -> None:
+    """Keep the project and NWN client content directories in sync through links."""
 
+    nwn_home = tmp_path / "nwn-home"
     controller, layout, build_calls, _ = make_controller(
         tmp_path,
-        nwn_home=tmp_path / "nwn-home",
+        nwn_home=nwn_home,
     )
-
     assert controller.run("build", []) == 0
 
     assert build_calls == [("all", ["are-dev-pgcc"], False)]
-    assert layout.hak_dir.resolve() == tmp_path / "nwn-home" / "hak"
-    assert layout.tlk_dir.resolve() == tmp_path / "nwn-home" / "tlk"
+    assert layout.hak_dir.is_symlink()
+    assert layout.tlk_dir.is_symlink()
+    assert layout.hak_dir.resolve() == (nwn_home / "hak").resolve()
+    assert layout.tlk_dir.resolve() == (nwn_home / "tlk").resolve()
+    assert (nwn_home / "hak").is_dir()
+    assert (nwn_home / "tlk").is_dir()
 
 
-def test_build_refuses_to_replace_non_empty_hak_dir(tmp_path: Path) -> None:
-    """Verify build protects a non-empty project HAK directory."""
+def test_build_warns_and_moves_populated_hak_directory_before_linking(
+    tmp_path: Path,
+) -> None:
+    """Preserve displaced project content while restoring the client HAK link."""
 
     output: list[str] = []
     controller, layout, build_calls, _ = make_controller(
         tmp_path,
-        output=output.append,
         nwn_home=tmp_path / "nwn-home",
+        output=output.append,
     )
     (layout.hak_dir / "existing.hak").write_bytes(b"existing")
 
-    assert controller.run("build", []) == 1
+    assert controller.run("build", []) == 0
 
-    assert build_calls == []
-    assert any("non-empty directory" in message for message in output)
+    assert build_calls == [("all", ["are-dev-pgcc"], False)]
+    assert layout.hak_dir.is_symlink()
+    assert (
+        layout.server_dir / "hak.aredev-shadowed" / "existing.hak"
+    ).read_bytes() == b"existing"
+    assert output == [
+        "W: Moved populated directory "
+        f"{layout.hak_dir} to {layout.server_dir / 'hak.aredev-shadowed'} "
+        "before linking it to the NWN home."
+    ]
+
+
+@pytest.mark.parametrize("mode", [[], ["dm"]], ids=["player", "dm"])
+def test_nwn_launcher_override_preserves_connection_arguments(
+    tmp_path: Path,
+    mode: list[str],
+) -> None:
+    """Use the configured launcher without requiring a discoverable NWN binary."""
+
+    controller, layout, _, runner = make_controller(
+        tmp_path,
+        runner=FakeRunner(running="aredevnwserver\n"),
+        nwn_install=tmp_path / "missing-install",
+    )
+    write_nwn_passwords(layout)
+    launcher = _create_executable(layout.root / "custom launcher")
+    _append_arebuilder_env(layout, f'NWN_LAUNCHER_PATH="{launcher.name}"')
+    controller.config = load_arebuilder_env(layout.root)
+
+    assert controller.run("nwn", mode) == 0
+
+    launch_args = runner.calls[-1]
+    assert Path(launch_args[0]).resolve() == launcher
+    assert launch_args[1:] == [
+        *(["-dmc"] if mode else []),
+        "+connect",
+        "127.0.0.1:5121",
+        "+password",
+        DM_PASSWORD if mode else PLAYER_PASSWORD,
+    ]
+    assert runner.cwd[-1].resolve() == launcher.parent
+    assert runner.detached[-1] is True
+
+
+@pytest.mark.parametrize("invalid_kind", ["missing", "non-executable"])
+def test_nwn_rejects_invalid_launcher_without_falling_back(
+    tmp_path: Path,
+    invalid_kind: str,
+) -> None:
+    """Report a bad override even when the install has a usable default client."""
+
+    if invalid_kind == "non-executable" and sys.platform == "win32":
+        pytest.skip("POSIX executable permissions")
+    output: list[str] = []
+    install = tmp_path / "install"
+    (install / "bin" / "linux-x86").mkdir(parents=True)
+    _create_executable(install / "bin" / "linux-x86" / "nwmain")
+    controller, layout, _, runner = make_controller(
+        tmp_path,
+        runner=FakeRunner(running="aredevnwserver\n"),
+        nwn_install=install,
+        output=output.append,
+    )
+    launcher = layout.root / "bad-launcher"
+    if invalid_kind == "non-executable":
+        launcher.write_text("#!/bin/sh\n", encoding="utf-8")
+        launcher.chmod(0o644)
+    _append_arebuilder_env(layout, f'NWN_LAUNCHER_PATH="{launcher}"')
+    controller.config = load_arebuilder_env(layout.root)
+
+    assert controller.run("nwn", []) == 1
+
+    assert all(call[0] == "docker" for call in runner.calls)
+    assert any("NWN_LAUNCHER_PATH" in message for message in output)
+    assert any(str(launcher) in message for message in output)
 
 
 def test_nwn_launches_client_from_detected_install_variant(

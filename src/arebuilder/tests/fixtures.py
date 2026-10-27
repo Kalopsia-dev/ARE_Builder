@@ -186,14 +186,14 @@ def write_synthetic_custom_content(custom_content_root: Path) -> None:
         input_2da_dir / "classes.2da",
         columns=["Label", "Name", "Plural", "Lower"],
         rows=[
-            [0, "Wizard", "****", "****"],
+            [0, "Wizard", "****", "****", "****"],
         ],
     )
     _write_input_2da(
         input_2da_dir / "racialtypes.2da",
         columns=["Label", "Name", "ConverName", "ConverNameLower", "NamePlural"],
         rows=[
-            [0, "Elf", "****", "****", "****"],
+            [0, "Elf", "****", "****", "****", "****"],
         ],
     )
     _write_input_2da(
