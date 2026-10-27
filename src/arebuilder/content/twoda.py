@@ -68,34 +68,36 @@ def parse_2da_text(
     validate_index: bool = True,
     warn_on_reindex: bool = True,
 ) -> TwoDAFile:
-    """Parse raw 2DA V2.0 text into normalized rows and optional default value metadata."""
+    """Validate cell counts before normalizing 2DA rows and optional defaults."""
 
     lines = text.splitlines()
     if not lines or lines[0].strip() != "2DA V2.0":
         raise TwoDAError("Expected 2DA V2.0 header.")
 
-    content_lines = lines[1:]
+    header_index = 1
     default_value: str | None = None
 
     # NWN 2DAs commonly include blank padding after the header and optional
     # DEFAULT line. Those lines are structural noise, not table rows.
-    while content_lines and not content_lines[0].strip():
-        content_lines = content_lines[1:]
-    if content_lines and content_lines[0].lstrip().startswith("DEFAULT:"):
-        default_value = content_lines[0].split(":", 1)[1].strip()
-        content_lines = content_lines[1:]
-    while content_lines and not content_lines[0].strip():
-        content_lines = content_lines[1:]
+    while header_index < len(lines) and not lines[header_index].strip():
+        header_index += 1
+    if header_index < len(lines) and lines[header_index].lstrip().startswith("DEFAULT:"):
+        default_value = lines[header_index].split(":", 1)[1].strip()
+        header_index += 1
+    while header_index < len(lines) and not lines[header_index].strip():
+        header_index += 1
 
-    if not content_lines:
+    if header_index == len(lines):
         raise TwoDAError("Unable to parse 2DA without a column header row.")
 
-    columns = _tokenize_2da_line(content_lines[0], source_path)
+    columns = _tokenize_2da_line(lines[header_index], source_path)
     if not columns:
         raise TwoDAError("Unable to parse 2DA column header row.")
 
     rows: list[TwoDARow] = []
-    for raw_line in content_lines[1:]:
+    for line_number, raw_line in enumerate(
+        lines[header_index + 1 :], start=header_index + 2
+    ):
         if not raw_line.strip():
             continue
         tokens = _tokenize_2da_line(raw_line, source_path)
@@ -106,15 +108,12 @@ def parse_2da_text(
         except ValueError as exc:
             raise TwoDAError(f"Invalid 2DA row index {tokens[0]!r}.") from exc
         value_tokens = tokens[1:]
-        if len(value_tokens) > len(columns):
-            source_label = source_path.name if source_path else "<memory>"
+        if len(value_tokens) != len(columns):
+            source_label = str(source_path) if source_path else "<memory>"
             raise TwoDAError(
-                f"{source_label}: Row {row_index} has {len(value_tokens)} values, "
-                f"but only {len(columns)} columns were declared."
+                f"{source_label}:{line_number}: Row {tokens[0]} has "
+                f"{len(value_tokens)} values; expected {len(columns)}."
             )
-        if len(value_tokens) < len(columns):
-            # Missing trailing cells are represented by NWN's "****" sentinel.
-            value_tokens.extend(["****"] * (len(columns) - len(value_tokens)))
         rows.append(
             TwoDARow(
                 index=row_index,
