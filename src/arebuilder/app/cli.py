@@ -1,5 +1,6 @@
 import argparse
 import sys
+from pathlib import Path
 from typing import Sequence
 
 from pydantic import ValidationError
@@ -67,11 +68,20 @@ def main(argv: Sequence[str] | None = None) -> int:
         settings = BuilderSettings(**_cli_overrides(args))
         if command == "compile" and args.palette_types:
             raise CliArgumentError("compile accepts at most one selector argument.")
+        if args.changes is not None:
+            if command != "compile":
+                raise CliArgumentError("--changes is only valid for compile.")
+            if args.target_name is not None:
+                raise CliArgumentError(
+                    "--changes cannot be combined with a script selector."
+                )
         return execute_build_command(
             command=command,
             target_name=args.target_name,
             palette_types=palette_types,
             settings=settings,
+            changes_path=args.changes,
+            ci=args.ci,
         )
     except CliArgumentError as exc:
         print(f"Invalid arguments: {exc}", flush=True)
@@ -131,6 +141,16 @@ def _build_parser() -> argparse.ArgumentParser:
         "--workers",
         type=int,
         help="Worker count for NWScript compilation. Defaults to CPU count.",
+    )
+    parser.add_argument(
+        "--changes",
+        type=Path,
+        help="TeamCity changed-files list for stateless compilation (CLI-only).",
+    )
+    parser.add_argument(
+        "--ci",
+        action="store_true",
+        help="Print compiled filenames instead of progress bars (CLI-only).",
     )
     parser.add_argument(
         "--live",

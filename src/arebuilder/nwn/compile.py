@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 from graphlib import CycleError, TopologicalSorter
 from hashlib import sha256
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Protocol
 
 from nwn.key import Reader as KeyReader
@@ -142,7 +142,7 @@ class ScriptIndex:
     # Atomic spacing prevents incomplete includes from repeatedly splitting
     # comment text while searching for a quoted resource name.
     regex_tokens = re.compile(
-        r'//[^\r\n]*|/\*[\s\S]*?(?:\*/|\Z)'
+        r"//[^\r\n]*|/\*[\s\S]*?(?:\*/|\Z)"
         r'|#include(?>\s+|/\*[\s\S]*?\*/|//[^\r\n]*[\r\n])+"([^"\r\n]+)"'
         r'|"[^"\\]*(?:\\.[^"\\]*)*"'
     )
@@ -155,13 +155,16 @@ class ScriptIndex:
         script_dir: Path,
         *,
         include_dirs: Iterable[Path] = (),
+        allow_missing: bool = False,
+        quiet: bool = False,
     ) -> None:
         """Initialize the instance with its required collaborators and state."""
 
-        if not script_dir.is_dir():
+        if not script_dir.is_dir() and (not allow_missing or script_dir.exists()):
             raise FileNotFoundError(f"Script directory '{script_dir}' does not exist.")
 
-        print("Indexing scripts...")
+        if not quiet:
+            print("Indexing scripts...")
         self.directory = script_dir
         self.include_dirs = [path for path in include_dirs if path.is_dir()]
         self.script_paths, primary_script_paths = self._index_script_paths()
@@ -479,7 +482,7 @@ class ProgressBar:
 
 
 class StatefulScriptCompiler:
-    """Compile NWScript files using dependency-aware state tracking."""
+    """Compile NWScript with dependency-aware selection and optional saved state."""
 
     def __init__(
         self,
@@ -495,10 +498,13 @@ class StatefulScriptCompiler:
         use_state: bool = True,
         clear_output_on_all: bool = True,
         compiler_factory: CompilerFactory | None = None,
+        changes_path: Path | None = None,
+        ci: bool = False,
+        preserved_outputs: Iterable[str] = (),
     ) -> None:
         """Initialize the instance with its required collaborators and state."""
 
-        self.script_dir = script_dir
+        self.script_dir = script_dir.absolute()
         self.output_dir = output_dir
         self.selector = selector
         self.state_path = state_path
@@ -509,7 +515,14 @@ class StatefulScriptCompiler:
         self.num_workers = (
             num_workers if num_workers > 0 else max(os.cpu_count() or 1, 1)
         )
-        self.use_state = use_state
+        if changes_path is not None and selector is not None:
+            raise CompileError("--changes cannot be combined with a script selector.")
+        self.changes_path = changes_path
+        self.ci = ci
+        self.preserved_outputs = {name.lower() for name in preserved_outputs}
+        self.removed_names: set[str] = set()
+        self.tracked_names: set[str] = set()
+        self.use_state = use_state and changes_path is None
         self.clear_output_on_all = clear_output_on_all
         self.uses_default_compiler = compiler_factory is None
         self.compiler_factory = compiler_factory or _create_nwn_compiler
@@ -518,38 +531,180 @@ class StatefulScriptCompiler:
         self.script_index: ScriptIndex | None = None
 
     def run(self) -> CompileResult:
-        """Run the configured compiler mode, creating state first when smart compile needs it."""
+        """Run the configured selection and finalize cleanup after successful compilation."""
 
         try:
-            self._validate_game_script_sources()
+            changed_names: set[str] = set()
+            if self.changes_path is not None:
+                changed_names, self.removed_names = self._read_changes()
             selector = self.selector
             if (
                 self.use_state
                 and selector not in {"all", "*"}
                 and not self._has_state()
             ):
-                print(
-                    "All scripts will be compiled to initialise the index.",
-                    end="\n\n",
-                )
+                if not self.ci:
+                    print(
+                        "All scripts will be compiled to initialise the index.",
+                        end="\n\n",
+                    )
                 selector = "all"
 
             self.script_index = ScriptIndex(
                 self.script_dir,
                 include_dirs=self.include_dirs,
+                allow_missing=(
+                    self._has_state()
+                    or (
+                        self.changes_path is not None
+                        and changed_names <= self.removed_names
+                    )
+                ),
+                quiet=self.ci,
             )
+            if self.changes_path is not None:
+                result = self.compile_changes(changed_names)
+            else:
+                if (
+                    self.use_state
+                    and self.state_path is not None
+                    and self.selector is None
+                ):
+                    self.tracked_names = set(read_hash_index(self.state_path))
+                    self.removed_names = {
+                        name
+                        for name in self.tracked_names
+                        if self.script_index.find_script_path(name) is None
+                    }
+                if selector is None:
+                    result = self.compile_modified()
+                else:
+                    param = ScriptIndex.normalise_script_name(selector)
+                    if param == "all":
+                        result = self.compile_all()
+                    elif param.endswith("*"):
+                        result = self.compile_wildcard(param)
+                    else:
+                        result = self.compile_script(param)
 
-            if selector is None:
-                return self.compile_modified()
-
-            param = ScriptIndex.normalise_script_name(selector)
-            if param == "all":
-                return self.compile_all()
-            if param.endswith("*"):
-                return self.compile_wildcard(param)
-            return self.compile_script(param)
+            stale_outputs = self._finish_cleanup()
+            if self.ci:
+                print("Compilation complete.", flush=True)
+            if stale_outputs:
+                print(
+                    "\nStale build artifacts:\n"
+                    + "\n".join(f"- {name}" for name in sorted(stale_outputs)),
+                    flush=True,
+                )
+            return result
         finally:
             self.game_scripts.close()
+
+    def _read_changes(self) -> tuple[set[str], set[str]]:
+        """Read TeamCity records for direct children of the configured script directory."""
+
+        assert self.changes_path is not None
+        changed: set[str] = set()
+        removed: set[str] = set()
+        ignored_statuses = {
+            "NOT_CHANGED",
+            "DIRECTORY_CHANGED",
+            "DIRECTORY_ADDED",
+            "DIRECTORY_REMOVED",
+        }
+        statuses = {"ADDED", "CHANGED", "REMOVED"} | ignored_statuses
+        for line_number, line in enumerate(
+            self.changes_path.read_text(encoding="utf-8-sig").splitlines(), start=1
+        ):
+            if not line.strip():
+                continue
+            fields = line.rsplit(":", 2)
+            if len(fields) != 3 or not all(fields) or fields[1] not in statuses:
+                raise CompileError(
+                    f"Invalid TeamCity change record at line {line_number}."
+                )
+            raw_path, status, _revision = fields
+            path = PurePosixPath(raw_path.replace("\\", "/"))
+            if (
+                path.is_absolute()
+                or ".." in path.parts
+                or re.match(r"^[A-Za-z]:", raw_path)
+            ):
+                raise CompileError(
+                    f"Invalid relative change path at line {line_number}."
+                )
+            if (
+                status in ignored_statuses
+                or len(path.parts) != 2
+                or path.parts[0] != self.script_dir.name
+                or path.suffix.lower() != ".nss"
+            ):
+                continue
+            name = ScriptIndex.normalise_script_name(path.name)
+            changed.add(name)
+            if status == "REMOVED":
+                removed.add(name)
+        return changed, removed
+
+    def compile_changes(self, changed_names: set[str]) -> CompileResult:
+        """Compile the union of explicit changes and their current dependents."""
+
+        script_index = self._require_index()
+        self.removed_names = {
+            name
+            for name in self.removed_names
+            if script_index.find_script_path(name) is None
+        }
+        missing = {
+            name
+            for name in changed_names - self.removed_names
+            if script_index.find_script_path(name) is None
+        }
+        if missing:
+            raise CompileError(
+                "E: Changed scripts missing from checkout: "
+                + ", ".join(f"{name}.nss" for name in sorted(missing))
+            )
+        selected = {
+            script
+            for name in changed_names
+            if (script := script_index.get(name)) is not None
+        }
+        return self.compile(script_index.get_related(selected))
+
+    def _finish_cleanup(self) -> set[str]:
+        """Prune removed state entries and owned outputs only after a successful run."""
+
+        if not self.use_state:
+            return {
+                f"{name}.ncs" for name in self.removed_names
+            } - self.preserved_outputs
+        # Selectors do not process every pending include deletion. Retain those
+        # hashes so the next incremental run still invalidates their dependents.
+        if self.state_path is None or self.selector is not None:
+            return set()
+        script_index = self._require_index()
+        executable_names = {
+            script.name for script in script_index.compilable_primary_scripts()
+        }
+        stale_outputs: set[str] = set()
+        for name in self.tracked_names - executable_names:
+            # Persisted keys are resource names, never paths into another directory.
+            if name != Path(name).name or "\\" in name:
+                raise CompileError(f"Invalid script name in saved state: {name!r}")
+            filename = f"{name}.ncs"
+            if filename not in self.preserved_outputs:
+                for output_dir in self.output_dirs:
+                    path = output_dir / filename
+                    if path.is_file() or path.is_symlink():
+                        path.unlink()
+                        stale_outputs.add(filename)
+        hashes = read_hash_index(self.state_path)
+        current = {script.name for script in script_index if script.contents}
+        retained = {name: value for name, value in hashes.items() if name in current}
+        if retained != hashes:
+            write_hash_index(self.state_path, retained)
+        return stale_outputs
 
     def compile_script(self, script_name: str) -> CompileResult:
         """Compile one named primary script and refresh state hashes."""
@@ -562,18 +717,24 @@ class StatefulScriptCompiler:
             raise CompileError(f"E: {script_name}.nss is a base game script.")
 
         if script.is_include or not script_index.is_compilable(script):
-            print("Include file detected. Checking dependencies...", end="\n\n")
+            if not self.ci:
+                print("Include file detected. Checking dependencies...", end="\n\n")
             to_compile = script_index.get_related({script})
             if not to_compile:
-                print(f"No scripts include {script.name}.")
+                if not self.ci:
+                    print(f"No scripts include {script.name}.")
                 return CompileResult(compiled_count=0)
-            print(f"{len(to_compile)} derived script(s) will be compiled.", end="\n\n")
+            if not self.ci:
+                print(
+                    f"{len(to_compile)} derived script(s) will be compiled.", end="\n\n"
+                )
             return self.compile(
                 scripts=to_compile,
                 new_hash_index=self._apply_hashes({script}),
             )
 
-        print(f"\nCompiling: {script.name}")
+        if not self.ci:
+            print(f"\nCompiling: {script.name}")
         return self.compile(
             scripts={script},
             new_hash_index=self._apply_hashes({script}),
@@ -584,12 +745,12 @@ class StatefulScriptCompiler:
 
         script_index = self._require_index()
         scripts = script_index.compilable_primary_scripts()
-        if self.clear_output_on_all:
-            self.clear_output_folders()
-        print(f"\nAll {len(scripts)} script(s) will be compiled.", end="\n\n")
+        if not self.ci:
+            print(f"\nAll {len(scripts)} script(s) will be compiled.", end="\n\n")
         return self.compile(
             scripts=scripts,
             new_hash_index=self._hash_all() if self.use_state else None,
+            clear_output=self.clear_output_on_all,
         )
 
     def compile_modified(self) -> CompileResult:
@@ -602,19 +763,26 @@ class StatefulScriptCompiler:
             raise CompileError("A state path is required for modified compilation.")
 
         modified = script_index.get_modified(state_path=self.state_path)
+        modified.update(
+            script
+            for name in self.removed_names
+            if (script := script_index.get(name)) is not None
+        )
         modified.update(self._missing_output_scripts())
         to_compile = script_index.get_related(modified)
         if not modified or not to_compile:
-            print("All scripts are up to date.")
+            if not self.ci:
+                print("All scripts are up to date.")
             return CompileResult(compiled_count=0)
 
-        changed_lines = "\n- ".join(sorted(str(script) for script in modified))
-        print(
-            f"\n{len(modified)} change(s) found:",
-            f"\n- {changed_lines}\n",
-            f"\n{len(to_compile)} related script(s) will be compiled.",
-            end="\n\n",
-        )
+        if not self.ci:
+            changed_lines = "\n- ".join(sorted(str(script) for script in modified))
+            print(
+                f"\n{len(modified)} change(s) found:",
+                f"\n- {changed_lines}\n",
+                f"\n{len(to_compile)} related script(s) will be compiled.",
+                end="\n\n",
+            )
         return self.compile(
             scripts=to_compile,
             new_hash_index=self._apply_hashes(modified),
@@ -635,16 +803,18 @@ class StatefulScriptCompiler:
         }
         to_compile = script_index.get_related(matches)
         if not matches or not to_compile:
-            print("No matches found.")
+            if not self.ci:
+                print("No matches found.")
             return CompileResult(compiled_count=0)
 
-        match_lines = "\n- ".join(sorted(str(script) for script in matches))
-        print(
-            f"\n{len(matches)} match(es) found:",
-            f"\n- {match_lines}\n",
-            f"\n{len(to_compile)} related script(s) will be compiled.",
-            end="\n\n",
-        )
+        if not self.ci:
+            match_lines = "\n- ".join(sorted(str(script) for script in matches))
+            print(
+                f"\n{len(matches)} match(es) found:",
+                f"\n- {match_lines}\n",
+                f"\n{len(to_compile)} related script(s) will be compiled.",
+                end="\n\n",
+            )
         return self.compile(
             scripts=to_compile,
             new_hash_index=self._apply_hashes(matches),
@@ -655,19 +825,28 @@ class StatefulScriptCompiler:
         scripts: Iterable[Script],
         *,
         new_hash_index: dict[str, int] | None = None,
+        clear_output: bool = False,
     ) -> CompileResult:
         """Compile a concrete script set in parallel, write outputs, and persist state hashes."""
 
         script_set = set(scripts)
         if not script_set:
-            print("No scripts to compile.\n\nOperation aborted.", end="\n\n")
+            if clear_output:
+                self.clear_output_folders()
+            if (
+                new_hash_index is not None
+                and self.use_state
+                and self.state_path is not None
+            ):
+                write_hash_index(self.state_path, new_hash_index)
             return CompileResult(compiled_count=0)
 
+        self._validate_game_script_sources()
         _ensure_compiler_thread_stack_size()
 
         init_lock = threading.Lock()
         thread_local = threading.local()
-        progress = ProgressBar(total=len(script_set))
+        progress = None if self.ci else ProgressBar(total=len(script_set))
 
         def init_compiler() -> None:
             """Create the thread-local compiler instance for worker threads."""
@@ -681,12 +860,17 @@ class StatefulScriptCompiler:
             """Compile one script inside the worker pool and normalize backend return shapes."""
 
             try:
+                if self.ci:
+                    with init_lock:
+                        print(f"Compiling {script.name}.nss", flush=True)
                 compiled = thread_local.compiler.compile(f"{script.name}.nss")
                 ncs_bytes = compiled[0] if isinstance(compiled, tuple) else compiled
-                progress.update()
+                if progress is not None:
+                    progress.update()
                 return f"{script.name}.ncs", ncs_bytes
             except CompilationError as error:
-                progress.close()
+                if progress is not None:
+                    progress.close()
                 print(f"\n{error.message.splitlines()[0].split(' [')[0]}")
                 raise
 
@@ -705,21 +889,27 @@ class StatefulScriptCompiler:
                     )
                     if ncs_bytes is not None
                 }
-            progress.close()
+            if progress is not None:
+                progress.close()
         except CompilationError as exc:
             raise CompileError(
                 "\nStopping processing on first error.\n\n1 error; see above for context."
             ) from exc
         except KeyboardInterrupt as exc:
-            progress.close(leave=False)
+            if progress is not None:
+                progress.close(leave=False)
             raise CompileError("\nStopping processing on user request.") from exc
         except Exception as exc:
-            progress.close()
+            if progress is not None:
+                progress.close()
             print("\nAn unexpected error occurred during compilation:", end="\n\n")
             traceback.print_exc()
             raise CompileError("\nStopping processing.") from exc
 
-        print("\nWriting script(s) to output folder...")
+        if clear_output:
+            self.clear_output_folders()
+        if not self.ci:
+            print("\nWriting script(s) to output folder...")
         for output_dir in self.output_dirs:
             output_dir.mkdir(parents=True, exist_ok=True)
             for ncs_name, ncs_bytes in compiled.items():
@@ -733,7 +923,8 @@ class StatefulScriptCompiler:
             write_hash_index(self.state_path, new_hash_index)
 
         compile_time = time.time() - self.start_time
-        print(f"Success!\n\nTotal Execution time = {compile_time:.4f} seconds\n")
+        if not self.ci:
+            print(f"Success!\n\nTotal Execution time = {compile_time:.4f} seconds\n")
         return CompileResult(compiled_count=len(compiled))
 
     def load_script(self, script_name: str) -> bytes | None:
@@ -765,11 +956,11 @@ class StatefulScriptCompiler:
         }
 
     def _has_state(self) -> bool:
-        """Return whether compiled output and hash state already exist."""
+        """Return whether a saved hash index is available for stateful compilation."""
 
         if self.state_path is None:
             return False
-        return bool(list(self.output_dir.glob("*.ncs"))) and self.state_path.exists()
+        return self.use_state and self.state_path.exists()
 
     def _apply_hashes(self, modified: set[Script]) -> dict[str, int] | None:
         """Merge modified-script hashes into the persisted hash index."""
@@ -829,8 +1020,11 @@ def compile_scripts(
     use_state: bool = True,
     clear_output_on_all: bool = True,
     compiler_factory: CompilerFactory | None = None,
+    changes_path: Path | None = None,
+    ci: bool = False,
+    preserved_outputs: Iterable[str] = (),
 ) -> CompileResult:
-    """Compile NWScript sources using the stateful compiler facade and return a result summary."""
+    """Compile NWScript sources using saved state or an explicit changes file."""
 
     compiler = StatefulScriptCompiler(
         script_dir=script_dir,
@@ -844,6 +1038,9 @@ def compile_scripts(
         use_state=use_state,
         clear_output_on_all=clear_output_on_all,
         compiler_factory=compiler_factory,
+        changes_path=changes_path,
+        ci=ci,
+        preserved_outputs=preserved_outputs,
     )
     return compiler.run()
 

@@ -37,12 +37,14 @@ class BuildEngine:
         runtime_paths: RuntimePaths | None = None,
         *,
         script_compiler: ScriptCompilerRunner | None = None,
-    ):
+        ci: bool = False,
+    ) -> None:
         """Initialize the instance with its required collaborators and state."""
 
         self.config = config
         self.runtime_paths = runtime_paths or RuntimePaths()
         self.script_compiler = script_compiler or compile_scripts
+        self.ci = ci
         self._talk_table: TalkTable | None = None
         self.default_palettes = list(DEFAULT_PALETTES)
         self._custom_content_cache: set[tuple[str, str, str, str | None, str]] = set()
@@ -68,10 +70,12 @@ class BuildEngine:
             self._apply_target_symlinks(module)
         return 0
 
-    def run_compile(self, selector: str | None = None) -> int:
-        """Run the stateful shared-script compile command with the provided selector."""
+    def run_compile(
+        self, selector: str | None = None, *, changes_path: Path | None = None
+    ) -> int:
+        """Compile shared scripts using saved state or an explicit TeamCity change list."""
 
-        self._compile_shared_scripts(selector)
+        self._compile_shared_scripts(selector, changes_path=changes_path)
         return 0
 
     def run_pack(self, target_name: str) -> int:
@@ -134,8 +138,10 @@ class BuildEngine:
 
         # Precompiled scripts are copied first so a fresh compile can intentionally
         # replace them with target-local output of the same basename.
-        self._copy_precompiled_scripts(module, workspace.build_dir)
-        self._compile_target_scripts(module, workspace)
+        preserved_outputs = self._copy_precompiled_scripts(module, workspace.build_dir)
+        self._compile_target_scripts(
+            module, workspace, preserved_outputs=preserved_outputs
+        )
 
     def _generate_palettes(
         self,
@@ -211,8 +217,10 @@ class BuildEngine:
         )
         apply_symlink_plan(plans)
 
-    def _compile_shared_scripts(self, selector: str | None) -> None:
-        """Compile shared ARE scripts through the stateful direct command."""
+    def _compile_shared_scripts(
+        self, selector: str | None, *, changes_path: Path | None = None
+    ) -> None:
+        """Compile shared scripts through the common compiler."""
 
         self.script_compiler(
             script_dir=self.runtime_paths.shared_compile_script_dir,
@@ -223,19 +231,26 @@ class BuildEngine:
             include_dirs=[],
             secondary_output_dir=self.runtime_paths.live_compile_output_dir,
             num_workers=self.runtime_paths.compile_workers,
-            use_state=True,
+            use_state=changes_path is None,
             clear_output_on_all=True,
+            changes_path=changes_path,
+            ci=self.ci,
         )
 
     def _compile_target_scripts(
         self,
         module: BuildModule,
         workspace: "ModuleBuildWorkspace",
+        *,
+        preserved_outputs: Iterable[str] = (),
     ) -> None:
         """Compile only target-local scripts into a module build directory."""
 
         script_dir = self.runtime_paths.target_script_dir(module)
-        if not script_dir.is_dir():
+        if (
+            not script_dir.is_dir()
+            and not self.runtime_paths.target_state_file(module).exists()
+        ):
             return
 
         result = self._run_quietly_on_success(
@@ -250,15 +265,20 @@ class BuildEngine:
                 num_workers=self.runtime_paths.compile_workers,
                 use_state=True,
                 clear_output_on_all=False,
+                ci=self.ci,
+                preserved_outputs=preserved_outputs,
             )
         )
         if getattr(result, "compiled_count", 0) > 0:
             print("Compiling module scripts...", flush=True)
 
-    def _copy_precompiled_scripts(self, module: BuildModule, build_dir: Path) -> None:
-        """Flatten conventional precompiled files into the build directory."""
+    def _copy_precompiled_scripts(
+        self, module: BuildModule, build_dir: Path
+    ) -> set[str]:
+        """Copy precompiled resources and return NCS names protected from stale cleanup."""
 
         build_dir.mkdir(parents=True, exist_ok=True)
+        preserved_outputs: set[str] = set()
         for compiled_dir in module.precompiled_dirs:
             if not compiled_dir.exists():
                 continue
@@ -266,6 +286,9 @@ class BuildEngine:
                 for filename in sorted(filenames):
                     source_path = Path(current_root) / filename
                     shutil.copy2(source_path, build_dir / filename)
+                    if source_path.suffix.lower() == ".ncs":
+                        preserved_outputs.add(filename.lower())
+        return preserved_outputs
 
     def _generate_custom_content(self, workspace: "ModuleBuildWorkspace") -> None:
         """Generate custom TLK and HAK outputs when a module enables them."""
@@ -298,10 +321,11 @@ class BuildEngine:
         )
         self._custom_content_cache.add(cache_key)
 
-    @staticmethod
-    def _run_quietly_on_success(action: Callable[[], object]) -> object:
+    def _run_quietly_on_success(self, action: Callable[[], object]) -> object:
         """Capture noisy compiler output and replay it only when the wrapped action fails."""
 
+        if self.ci:
+            return action()
         output = io.StringIO()
         try:
             with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
