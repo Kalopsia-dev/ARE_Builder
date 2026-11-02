@@ -57,22 +57,24 @@ class Script:
         self.primary = script_path is not None and script_index.is_primary_script_path(
             script_path
         )
-        if script_path is None:
-            # Missing local files are usually base-game includes. We still keep a
-            # lightweight Script object so dependency graphs can reference them.
-            self.path = None
+        self.path = script_path
+        self.contents: bytes | None = None
+        if script_path is not None:
+            self.contents = _read_script_bytes(script_path)
+        elif script_index.base_script_loader is not None:
+            self.contents = script_index.base_script_loader(f"{self.name}.nss")
+        if self.contents is None:
+            # Keep unresolved include nodes so deleted sources can still select
+            # their surviving dependents.
             self.hash = _hash_text(self.name)
             self.include_names: set[str] = set()
             self.includes: set[Script] = set()
-            self.contents = None
             self.declares_main = False
             self.is_entrypoint_alias = False
             self.has_main = False
             script_index.add(self)
             return
 
-        self.path = script_path
-        self.contents = _read_script_bytes(script_path)
         self.hash = hash_script_contents(self.contents)
         script_index.add(self)
 
@@ -127,7 +129,7 @@ class Script:
                 result += f", {derived:4d} derived"
             return result
 
-        if not self.contents:
+        if self.path is None:
             return format_name("[Base Script]")
         dependencies = len(self.includes)
         if self.is_include or not self.declares_main:
@@ -155,6 +157,7 @@ class ScriptIndex:
         script_dir: Path,
         *,
         include_dirs: Iterable[Path] = (),
+        base_script_loader: Callable[[str], bytes | None] | None = None,
         allow_missing: bool = False,
         quiet: bool = False,
     ) -> None:
@@ -166,6 +169,7 @@ class ScriptIndex:
         if not quiet:
             print("Indexing scripts...")
         self.directory = script_dir
+        self.base_script_loader = base_script_loader
         self.include_dirs = [path for path in include_dirs if path.is_dir()]
         self.script_paths, primary_script_paths = self._index_script_paths()
         self.scripts: dict[str, Script] = {}
@@ -234,7 +238,7 @@ class ScriptIndex:
         return {
             script
             for script in self
-            if script.contents
+            if script.path is not None and script.contents
             if script.name not in hash_index or hash_index[script.name] != script.hash
         }
 
@@ -282,7 +286,7 @@ class ScriptIndex:
         return script_paths, primary_script_paths
 
     def _discover_referenced_scripts(self) -> None:
-        """Index every custom script reachable from primary script include directives."""
+        """Index effective custom and game sources reachable from primary scripts."""
 
         pending = deque(self.scripts.values())
         visited: set[Script] = set()
@@ -559,6 +563,7 @@ class StatefulScriptCompiler:
             self.script_index = ScriptIndex(
                 self.script_dir,
                 include_dirs=self.include_dirs,
+                base_script_loader=self.game_scripts.get,
                 allow_missing=(
                     self._has_state()
                     or (
@@ -659,7 +664,8 @@ class StatefulScriptCompiler:
         self.removed_names = {
             name
             for name in self.removed_names
-            if script_index.find_script_path(name) is None
+            if (script_path := script_index.find_script_path(name)) is None
+            or not script_index.is_primary_script_path(script_path)
         }
         missing = {
             name
@@ -715,7 +721,11 @@ class StatefulScriptCompiler:
                         path.unlink()
                         stale_outputs.add(filename)
         hashes = read_hash_index(self.state_path)
-        current = {script.name for script in script_index if script.contents}
+        current = {
+            script.name
+            for script in script_index
+            if script.path is not None and script.contents
+        }
         retained = {name: value for name, value in hashes.items() if name in current}
         if retained != hashes:
             write_hash_index(self.state_path, retained)
@@ -947,8 +957,9 @@ class StatefulScriptCompiler:
 
         normalised = ScriptIndex.normalise_script_name(script_name)
         script_index = self._require_index()
-        if (script := script_index.get(normalised)) and script.contents:
-            return script.contents
+        if (script := script_index.get(normalised)) and script.contents is not None:
+            # The native binding treats empty buffers as missing files.
+            return script.contents or b"\n"
         return self.game_scripts.get(f"{normalised}.nss")
 
     def clear_output_folders(self) -> None:
@@ -986,7 +997,11 @@ class StatefulScriptCompiler:
             raise CompileError("A state path is required to update script hashes.")
         hashes = read_hash_index(self.state_path)
         hashes.update(
-            {script.name: script.hash for script in modified if script.contents}
+            {
+                script.name: script.hash
+                for script in modified
+                if script.path is not None and script.contents
+            }
         )
         return hashes
 
@@ -998,7 +1013,7 @@ class StatefulScriptCompiler:
         return {
             script.name: script.hash
             for script in self._require_index()
-            if script.contents
+            if script.path is not None and script.contents
         }
 
     def _require_index(self) -> ScriptIndex:

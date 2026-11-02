@@ -10,6 +10,165 @@ from arebuilder.nwn.compile import CompileError, compile_scripts
 from arebuilder.tests.nwn.test_compile import fake_compiler_factory
 
 
+@pytest.mark.parametrize("archived", [False, True])
+@pytest.mark.parametrize("explicit_changes", [False, True])
+def test_game_include_dependencies_follow_current_overrides(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    archived: bool,
+    explicit_changes: bool,
+) -> None:
+    """Complete game includes must expose dependencies on overridden game resources."""
+
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    (scripts / "first.nss").write_text(
+        '#include "base_bridge"\nvoid main() { int value = LeafValue(); }'
+    )
+    (scripts / "second.nss").write_text(
+        '#include "inc_leaf"\nvoid main() { int value = LeafValue(); }'
+    )
+    (scripts / "unrelated.nss").write_text("void main() {}")
+    sources = {
+        "nwscript.nss": b"void PrintString(string text);",
+        "base_bridge.nss": b'#include "base_middle"',
+        "base_middle.nss": b'#include "inc_leaf"',
+        "inc_leaf.nss": b"int LeafValue() { return 0; }",
+    }
+    game = tmp_path / "game"
+    if archived:
+        (game / "data").mkdir(parents=True)
+        (game / "data" / "nwn_base.key").write_bytes(b"test archive")
+
+        class FakeKeyReader:
+            filenames = list(sources)
+
+            def __init__(self, path: str) -> None:
+                self.path = path
+
+            def read_file(self, name: str) -> bytes:
+                return sources[name]
+
+            def close(self) -> None:
+                pass
+
+        monkeypatch.setattr(script_compile, "KeyReader", FakeKeyReader)
+    else:
+        (game / "ovr").mkdir(parents=True)
+        for name, contents in sources.items():
+            (game / "ovr" / name).write_bytes(contents)
+    output = tmp_path / "output"
+    state = tmp_path / "state.json"
+    changes = tmp_path / "changes.txt"
+    options = {
+        "script_dir": scripts,
+        "output_dir": output,
+        "nwn_root": game,
+        "state_path": state,
+        "ci": True,
+    }
+    override = scripts / "base_bridge.nss"
+    leaf = scripts / "inc_leaf.nss"
+    # A local A* removes A -> B; deleting A* restores the shipped dependency.
+    for bridge_override, expected in [
+        (None, 2),
+        ("int LeafValue() { return 9; }", 1),
+        (None, 2),
+    ]:
+        if bridge_override is None:
+            override.unlink(missing_ok=True)
+        else:
+            override.write_text(bridge_override)
+        leaf.write_text("int LeafValue() { return 1; }")
+        assert compile_scripts(**options, selector="all").compiled_count == 3
+        previous = {
+            name: (output / name).read_bytes()
+            for name in ("first.ncs", "second.ncs", "unrelated.ncs")
+        }
+        leaf.write_text("int LeafValue() { return 2; }")
+        changes.write_text("scripts/inc_leaf.nss:CHANGED:abc\n")
+
+        result = compile_scripts(
+            **options,
+            changes_path=changes if explicit_changes else None,
+        )
+
+        assert result.compiled_count == expected
+        assert ((output / "first.ncs").read_bytes() != previous["first.ncs"]) == (
+            expected == 2
+        )
+        assert (output / "second.ncs").read_bytes() != previous["second.ncs"]
+        assert (output / "unrelated.ncs").read_bytes() == previous["unrelated.ncs"]
+        assert set(json.loads(state.read_text())) == {
+            "first",
+            "second",
+            "unrelated",
+            "inc_leaf",
+            *({"base_bridge"} if bridge_override is not None else set()),
+        }
+
+
+def test_deleted_override_restores_game_entrypoint_alias(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    (scripts / "alias.nss").write_text('#include "base_entry"')
+    override = scripts / "base_entry.nss"
+    override.write_text("int helper() { return 1; }")
+    game = tmp_path / "game"
+    (game / "ovr").mkdir(parents=True)
+    (game / "ovr" / "nwscript.nss").write_text("void PrintString(string text);")
+    (game / "ovr" / "base_entry.nss").write_text("void main() {}")
+    output = tmp_path / "output"
+    changes = tmp_path / "changes.txt"
+    changes.write_text("scripts/base_entry.nss:CHANGED:abc\n")
+    options = {
+        "script_dir": scripts,
+        "output_dir": output,
+        "nwn_root": game,
+        "changes_path": changes,
+        "ci": True,
+    }
+    assert compile_scripts(**options).compiled_count == 0
+    override.unlink()
+    changes.write_text("scripts/base_entry.nss:REMOVED:def\n")
+    capsys.readouterr()
+
+    assert compile_scripts(**options).compiled_count == 1
+    assert (output / "alias.ncs").read_bytes().startswith(b"NCS V1.0")
+    assert capsys.readouterr().out == (
+        "Compiling alias.nss\nCompilation complete.\n\n"
+        "Stale build artifacts:\n- base_entry.ncs\n"
+    )
+
+
+def test_empty_override_shadows_game_source_during_native_compilation(
+    tmp_path: Path,
+) -> None:
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    (scripts / "base_bridge.nss").write_bytes(b"")
+    (scripts / "first.nss").write_text(
+        '#include "base_bridge"\nint Helper() { return 2; }\n'
+        "void main() { int value = Helper(); }"
+    )
+    game = tmp_path / "game"
+    (game / "ovr").mkdir(parents=True)
+    (game / "ovr" / "nwscript.nss").write_text("void PrintString(string text);")
+    (game / "ovr" / "base_bridge.nss").write_text("int Helper() { return 1; }")
+    assert (
+        compile_scripts(
+            script_dir=scripts,
+            output_dir=tmp_path / "output",
+            nwn_root=game,
+            use_state=False,
+            ci=True,
+        ).compiled_count
+        == 1
+    )
+
+
 def test_changes_compile_transitive_dependents_without_touching_state(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -530,3 +689,58 @@ def test_removed_primary_output_is_cleaned_even_when_shared_source_exists(
     assert compile_scripts(**options).compiled_count == 0
     assert not (output / "example.ncs").exists()
     assert "example" not in json.loads(state.read_text())
+
+
+@pytest.mark.parametrize("fallback_has_entrypoint", [False, True])
+def test_removed_primary_reports_stale_output_with_include_directory_fallback(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], fallback_has_entrypoint: bool
+) -> None:
+    """Fallback includes can preserve aliases, but cannot regenerate primary output."""
+
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    primary = scripts / "example.nss"
+    primary.write_text("void main() {}")
+    (scripts / "alias.nss").write_text('#include "example"')
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    (shared / "example.nss").write_text(
+        "void main() { int value = 1; }"
+        if fallback_has_entrypoint
+        else "int helper() { return 1; }"
+    )
+    game = tmp_path / "game"
+    (game / "ovr").mkdir(parents=True)
+    (game / "ovr" / "nwscript.nss").write_text("void PrintString(string text);")
+    output = tmp_path / "output"
+    options = {
+        "script_dir": scripts,
+        "include_dirs": [shared],
+        "output_dir": output,
+        "nwn_root": game,
+        "use_state": False,
+        "ci": True,
+    }
+    assert compile_scripts(**options).compiled_count == 2
+    previous = {path.name: path.read_bytes() for path in output.glob("*.ncs")}
+    primary.unlink()
+    changes = tmp_path / "changes.txt"
+    changes.write_text("scripts/example.nss:REMOVED:abc\n")
+    capsys.readouterr()
+
+    result = compile_scripts(**options, changes_path=changes)
+
+    assert result.compiled_count == int(fallback_has_entrypoint)
+    assert (output / "example.ncs").read_bytes() == previous["example.ncs"]
+    if fallback_has_entrypoint:
+        assert (output / "alias.ncs").read_bytes() != previous["alias.ncs"]
+        assert capsys.readouterr().out == (
+            "Compiling alias.nss\nCompilation complete.\n\n"
+            "Stale build artifacts:\n- example.ncs\n"
+        )
+    else:
+        assert (output / "alias.ncs").read_bytes() == previous["alias.ncs"]
+        assert capsys.readouterr().out == (
+            "Compilation complete.\n\nStale build artifacts:\n"
+            "- alias.ncs\n- example.ncs\n"
+        )

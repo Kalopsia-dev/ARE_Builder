@@ -473,15 +473,15 @@ def test_host_update_reports_pull_status(
     fake_bin.mkdir()
     docker = fake_bin / "docker"
     docker.write_text(
-        '#!/bin/sh\n'
+        "#!/bin/sh\n"
         'case " $* " in\n'
         '  *" pull "*)\n'
         '    if [ "$PULL_STATUS" -ne 0 ]; then\n'
         '      echo "Server image pull failed: registry unavailable." >&2\n'
-        '    fi\n'
+        "    fi\n"
         '    case " $* " in *" --ignore-pull-failures "*) exit 0 ;; esac\n'
         '    exit "$PULL_STATUS" ;;\n'
-        'esac\n',
+        "esac\n",
         encoding="utf-8",
     )
     docker.chmod(0o755)
@@ -489,7 +489,12 @@ def test_host_update_reports_pull_status(
     lock.mkdir(parents=True)
 
     completed = subprocess.run(
-        ["sh", str(project / "data/bin/aredev-host-launcher.sh"), "update", str(project)],
+        [
+            "sh",
+            str(project / "data/bin/aredev-host-launcher.sh"),
+            "update",
+            str(project),
+        ],
         env={
             **os.environ,
             "PATH": str(fake_bin) + os.pathsep + os.environ["PATH"],
@@ -521,9 +526,7 @@ def test_init_generates_profiler_dashboard_assets(
     initialize_aredev_project(project)
 
     grafana_config = project / "config" / "grafana"
-    datasource_path = (
-        grafana_config / "provisioning" / "datasources" / "nwnx.yml"
-    )
+    datasource_path = grafana_config / "provisioning" / "datasources" / "nwnx.yml"
     provider_path = grafana_config / "provisioning" / "dashboards" / "nwnx.yml"
     dashboard_path = grafana_config / "dashboards" / "nwnx-profiler.json"
     assert datasource_path.is_file()
@@ -557,17 +560,16 @@ def test_init_generates_profiler_dashboard_assets(
         "NWScript work",
         "Pathing work",
     }
-    assert {
-        panel["datasource"]["uid"] for panel in dashboard["panels"]
-    } == {"nwnx-profiler"}
+    assert {panel["datasource"]["uid"] for panel in dashboard["panels"]} == {
+        "nwnx-profiler"
+    }
     assert {
         target["datasource"]["uid"]
         for panel in dashboard["panels"]
         for target in panel["targets"]
     } == {"nwnx-profiler"}
     assert {
-        panel["title"]: panel["targets"][0]["query"]
-        for panel in dashboard["panels"]
+        panel["title"]: panel["targets"][0]["query"] for panel in dashboard["panels"]
     } == {
         "Game tick rate": (
             'SELECT mean("Count") FROM "NWNX_Profiler.GameTickRate" '
@@ -980,23 +982,9 @@ def test_force_init_upgrades_a_pre_monitoring_scaffold(
     compose_path = project / "docker-compose.yml"
     nwserver_env_path = project / "config" / "nwserver.env"
     grafana_assets = (
-        project
-        / "config"
-        / "grafana"
-        / "provisioning"
-        / "datasources"
-        / "nwnx.yml",
-        project
-        / "config"
-        / "grafana"
-        / "provisioning"
-        / "dashboards"
-        / "nwnx.yml",
-        project
-        / "config"
-        / "grafana"
-        / "dashboards"
-        / "nwnx-profiler.json",
+        project / "config" / "grafana" / "provisioning" / "datasources" / "nwnx.yml",
+        project / "config" / "grafana" / "provisioning" / "dashboards" / "nwnx.yml",
+        project / "config" / "grafana" / "dashboards" / "nwnx-profiler.json",
     )
     compose_path.write_text("services:\n  nwserver: {}\n", encoding="utf-8")
     nwserver_env_path.write_text("NWNX_CORE_SKIP_ALL=no\n", encoding="utf-8")

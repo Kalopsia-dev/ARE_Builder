@@ -169,8 +169,14 @@ selected; other directories, non-script files, directory records, and
 `NOT_CHANGED` records are ignored. Malformed records fail with a line number.
 
 The complete current script directory is required to discover affected
-dependents, including transitive includes. `--changes` replaces saved-hash
-selection: no state file is read, written, or removed, and unrelated missing
+dependents, including transitive includes. Discovery follows reachable base-game
+sources using the same source precedence as compilation: primary scripts, extra
+include directories, then game resources. Overrides replace the shipped source's
+dependencies; deleting an override restores the shipped dependencies. Game
+sources are read in memory and are not stored in the hash index.
+
+`--changes` replaces saved-hash selection: no state file is read, written, or
+removed, and unrelated missing
 outputs do not trigger compilation. Empty changes succeed without compiling
 anything. A positional selector cannot be combined with `--changes`.
 
@@ -194,8 +200,9 @@ point and affected entry-point aliases that are no longer executable also
 produce deletion candidates. Removed and changed include-only sources can
 therefore produce `.ncs` candidates that never existed; deleting a nonexistent
 file must be harmless. Restored files are classified using their current entry
-points. Failed runs emit neither the completion line nor the stale-artifact
-block.
+points. An include-directory fallback can keep dependents executable, but does
+not preserve the removed primary source's output. Failed runs emit neither the
+completion line nor the stale-artifact block.
 
 Treat compiled files as a delta: overlay them on the previous artifact,
 preserve unchanged scripts, and apply the explicit deletion candidates.
