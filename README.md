@@ -2,7 +2,7 @@
 
 ![AREDev terminal banner](assets/aredev.png)
 
-`arebuilder` builds Neverwinter Nights: Enhanced Edition module artifacts from an AREDev-style project folder. It can scaffold a local AREDev workspace, run the interactive AREDev workflow, compile shared NWScript sources, and package module outputs for local development or Docker-backed workflows.
+`arebuilder` builds Neverwinter Nights: Enhanced Edition module artifacts and compiles NWScript sources. It can compile a standalone script directory, scaffold a local AREDev workspace, run the interactive AREDev workflow, and package module outputs for local development or Docker-backed workflows.
 
 Builder commands use the current directory as the project root by default. In normal use, `cd` into the target AREDev folder first and run commands from there, or specify the project root via `--root [path]`.
 
@@ -11,9 +11,9 @@ Builder commands use the current directory as the project root by default. In no
 - Python 3.13 or newer for native use
 - Docker for Docker-backed AREDev projects
 - A Neverwinter Nights: Enhanced Edition install for script compilation and server/client workflows
-- AREDev resource checkouts copied or cloned into the initialized project:
+- For AREDev workflows, resource checkouts copied or cloned into the initialized project:
   - `are-resources`
-  - `<target>-resources`, such as `pgcc-resources`
+  - `<target>-resources`
 
 ## Setup
 
@@ -92,7 +92,7 @@ scaffold-managed configuration, so preserve any local changes first.
 
 ## Compile Command
 
-`compile` is the main direct builder command for shared NWScript sources. It reads scripts from the shared resources tree, writes compiled `.ncs` files, and stores a state file so later runs can compile only changed scripts and affected dependents.
+`compile` reads a directory of NWScript sources and writes executable `.ncs` files. By default it stores source hashes so later runs compile only changed scripts and affected dependents. In an AREDev workspace it uses the shared resources tree by default; explicit paths support standalone compilation without an AREDev layout.
 
 ```bash
 cd /path/to/AREDev
@@ -107,6 +107,13 @@ Selector behavior:
 - no selector: compile changed shared scripts using the state file
 - `all`: compile every shared script with an entry point
 - script name or wildcard: compile matching script(s), including dependents when a selected script is an include
+
+Successful incremental stateful compiles also remove outputs for previously
+indexed sources that no longer produce executable scripts, and prune obsolete
+hash entries. Cleanup includes an enabled live output directory and preserves
+unrelated files and precompiled module fallbacks. Named and wildcard compiles
+leave pending deletion cleanup for the next incremental run, so deleted includes
+still trigger their dependents. Compilation errors leave cleanup unapplied.
 
 Default paths:
 
@@ -126,8 +133,72 @@ arebuilder \
   compile
 ```
 
-The same settings can be provided through `SCRIPT_DIR`, `OUTPUT_DIR`, and `STATE_FILE`. If you cannot run from the project directory, use
+The same settings can be provided through `SCRIPT_DIR`, `OUTPUT_DIR`, and `STATE_FILE`.
+Set the game installation with `--nwn-root` or `NWN_ROOT`, and the compiler worker
+count with `--workers` or `COMPILE_WORKERS` (by default, CPU count).
+If you cannot run from the project directory, use
 `--root /path/to/AREDev` or set `AREDEV_ROOT=/path/to/AREDev`.
+
+### TeamCity and CI logging
+
+Pass TeamCity's changed-files list directly for stateless incremental compilation:
+
+```bash
+arebuilder \
+  --script-dir /path/to/scripts \
+  --output-dir /path/to/compiled \
+  --nwn-root /path/to/nwn \
+  --changes /path/to/changes.txt \
+  --ci \
+  compile
+```
+
+Both `--changes` and `--ci` are CLI-only. `--changes` accepts TeamCity records
+with one `relative/path:STATUS:revision` per line, for example:
+
+```text
+scripts/example.nss:CHANGED:revision
+scripts/new_script.nss:ADDED:revision
+scripts/removed_script.nss:REMOVED:revision
+```
+
+The first path component must match the configured script directory's name:
+`scripts/example.nss` corresponds to `/path/to/scripts/example.nss`. No `--root`
+or particular working directory is needed. Only direct `.nss` children are
+selected; other directories, non-script files, directory records, and
+`NOT_CHANGED` records are ignored. Malformed records fail with a line number.
+
+The complete current script directory is required to discover affected
+dependents, including transitive includes. `--changes` replaces saved-hash
+selection: no state file is read, written, or removed, and unrelated missing
+outputs do not trigger compilation. Empty changes succeed without compiling
+anything. A positional selector cannot be combined with `--changes`.
+
+`--ci` replaces progress bars and verbose selection details with flushed lines
+as each compilation starts. It also works without `--changes`. Parallel workers
+may start scripts in different orders. Successful output looks like:
+
+```text
+Compiling example.nss
+Compiling dependent_script.nss
+Compilation complete.
+
+Stale build artifacts:
+- removed_script.ncs
+```
+
+The optional stale-artifact block is sorted and deduplicated. In `--changes`
+mode, these are deletion candidates for the build job to apply; arebuilder
+does not clear or delete existing outputs. Removed includes also produce an
+`.ncs` candidate, so deleting a nonexistent file must be harmless. A path that
+exists again in the current checkout is compiled rather than reported as
+deleted. Failed runs emit neither the completion line nor the stale-artifact
+block.
+
+Treat compiled files as a delta: overlay them on the previous artifact,
+preserve unchanged scripts, and apply the explicit deletion candidates.
+Absence from this run's output does not mean deletion. The changes list must
+cover all changes since that artifact, including changes spanning failed builds.
 
 ## Other Builder Commands
 
