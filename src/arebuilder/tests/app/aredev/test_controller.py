@@ -538,11 +538,26 @@ def test_docker_backend_runs_builder_through_compose(tmp_path: Path) -> None:
     ] in runner.calls
 
 
+@pytest.mark.parametrize(
+    ("host_platform", "expected_home_name"),
+    [("linux", "real-nwn-home"), ("darwin", "nwn-home")],
+)
 def test_docker_backend_uses_main_compose_file_with_podman(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    host_platform: str,
+    expected_home_name: str,
 ) -> None:
-    """Verify Podman uses podman-compose instead of Docker's Compose plugin."""
+    """Verify Podman provider selection and platform-specific NWN home mounts."""
+
+    for name in (
+        "AREDEV_NWN_HOME_ROOT",
+        "AREDEV_NWN_HOME_MOUNT_TARGET",
+        "AREDEV_NWN_CONTENT_MOUNT_ROOT",
+        "PODMAN_COMPOSE_PROVIDER",
+        "PODMAN_COMPOSE_WARNING_LOGS",
+    ):
+        monkeypatch.delenv(name, raising=False)
 
     project = tmp_path / "AREDev"
     initialize_aredev_project(project, backend="docker")
@@ -586,6 +601,7 @@ def test_docker_backend_uses_main_compose_file_with_podman(
         process_runner=podman_only_runner,
         output=lambda _message: None,
     )
+    monkeypatch.setattr("arebuilder.app.aredev.controller.sys.platform", host_platform)
 
     assert controller.run("build", []) == 0
 
@@ -602,12 +618,20 @@ def test_docker_backend_uses_main_compose_file_with_podman(
         "are-dev-pgcc",
     ]
     compose_index = calls.index(compose_call)
-    assert environments[compose_index]["AREDEV_NWN_HOME_ROOT"] == str(nwn_home)
-    assert environments[compose_index]["AREDEV_NWN_HOME_MOUNT_TARGET"] == str(nwn_home)
-    assert (
-        environments[compose_index]["AREDEV_NWN_CONTENT_MOUNT_ROOT"]
-        == "/nwn/aredev-direct-content"
+    assert environments[compose_index]["AREDEV_NWN_HOME_ROOT"] == str(
+        tmp_path / expected_home_name
     )
+    if host_platform == "linux":
+        assert environments[compose_index]["AREDEV_NWN_HOME_MOUNT_TARGET"] == str(
+            nwn_home
+        )
+        assert (
+            environments[compose_index]["AREDEV_NWN_CONTENT_MOUNT_ROOT"]
+            == "/nwn/aredev-direct-content"
+        )
+    else:
+        assert "AREDEV_NWN_HOME_MOUNT_TARGET" not in environments[compose_index]
+        assert "AREDEV_NWN_CONTENT_MOUNT_ROOT" not in environments[compose_index]
     assert environments[compose_index]["PODMAN_COMPOSE_PROVIDER"] == str(provider)
     assert environments[compose_index]["PODMAN_COMPOSE_WARNING_LOGS"] == "false"
 
