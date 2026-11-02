@@ -60,7 +60,7 @@ def test_changes_compile_transitive_dependents_without_touching_state(
     log = capsys.readouterr().out
     assert "Compiling first.nss\n" in log
     assert "Compilation complete.\n" in log
-    assert "Stale build artifacts:" not in log
+    assert "Stale build artifacts:\n- leaf.ncs\n" in log
     assert "change(s) found" not in log
 
 
@@ -159,6 +159,70 @@ def test_deletion_only_changes_report_candidates_without_removing_output(
     assert capsys.readouterr().out.endswith(
         "Compilation complete.\n\nStale build artifacts:\n- a_deleted.ncs\n- z_deleted.ncs\n"
     )
+
+
+@pytest.mark.parametrize("replacement", ["int helper() { return 1; }", ""])
+def test_changes_report_lost_entrypoint_and_transitive_alias_artifacts(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], replacement: str
+) -> None:
+    """Report obsolete executables even when the delta output has no previous NCS."""
+
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    (scripts / "entry.nss").write_text("void main() {}")
+    (scripts / "alias.nss").write_text('#include "entry"')
+    (scripts / "alias_outer.nss").write_text('#include "alias"')
+    (scripts / "library.nss").write_text(
+        '#include "entry"\nint another_helper() { return 2; }'
+    )
+    (scripts / "unaffected.nss").write_text("void main() {}")
+    game = tmp_path / "game"
+    (game / "ovr").mkdir(parents=True)
+    (game / "ovr" / "nwscript.nss").write_text("void PrintString(string text);")
+    baseline = tmp_path / "baseline"
+    state = tmp_path / "state.json"
+    assert (
+        compile_scripts(
+            script_dir=scripts,
+            output_dir=baseline,
+            nwn_root=game,
+            state_path=state,
+        ).compiled_count
+        == 4
+    )
+    previous_outputs = {path.name: path.read_bytes() for path in baseline.glob("*.ncs")}
+    assert set(previous_outputs) == {
+        "entry.ncs",
+        "alias.ncs",
+        "alias_outer.ncs",
+        "unaffected.ncs",
+    }
+    (scripts / "entry.nss").write_text(replacement)
+    state.write_text("must not be read or changed")
+    changes = tmp_path / "changes.txt"
+    changes.write_text("scripts/entry.nss:CHANGED:abc\n")
+    delta = tmp_path / "delta"
+    capsys.readouterr()
+
+    result = compile_scripts(
+        script_dir=scripts,
+        output_dir=delta,
+        nwn_root=game,
+        state_path=state,
+        changes_path=changes,
+        ci=True,
+    )
+
+    assert result.compiled_count == 0
+    assert capsys.readouterr().out == (
+        "Compilation complete.\n\nStale build artifacts:\n"
+        "- alias.ncs\n- alias_outer.ncs\n- entry.ncs\n"
+    )
+    assert not delta.exists()
+    assert state.read_text() == "must not be read or changed"
+    assert {
+        path.name: path.read_bytes() for path in baseline.glob("*.ncs")
+    } == previous_outputs
 
 
 @pytest.mark.parametrize("ci", [False, True])

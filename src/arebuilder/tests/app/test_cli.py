@@ -265,7 +265,7 @@ def test_ci_changes_compile_without_project_layout_or_state(
     log = capsys.readouterr()
     assert log.out == (
         "Compiling affected.nss\nCompilation complete.\n\n"
-        "Stale build artifacts:\n- removed.ncs\n"
+        "Stale build artifacts:\n- inc_shared.ncs\n- removed.ncs\n"
     )
     assert log.err == ""
     assert not (unrelated / "temp").exists()

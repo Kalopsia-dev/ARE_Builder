@@ -238,8 +238,10 @@ class ScriptIndex:
             if script.name not in hash_index or hash_index[script.name] != script.hash
         }
 
-    def get_related(self, scripts: set[Script]) -> set[Script]:
-        """Return compilable scripts directly selected or dependent on selected includes."""
+    def get_related(
+        self, scripts: set[Script], *, compilable_only: bool = True
+    ) -> set[Script]:
+        """Return related primary scripts, optionally retaining non-executable sources."""
 
         related = set(scripts)
         for script in scripts:
@@ -248,7 +250,10 @@ class ScriptIndex:
         return {
             script
             for script in related
-            if script.primary and script.contents and self.is_compilable(script)
+            if script.primary
+            and (
+                not compilable_only or (script.contents and self.is_compilable(script))
+            )
         }
 
     def is_compilable(self, script: Script) -> bool:
@@ -521,6 +526,7 @@ class StatefulScriptCompiler:
         self.ci = ci
         self.preserved_outputs = {name.lower() for name in preserved_outputs}
         self.removed_names: set[str] = set()
+        self.stale_names: set[str] = set()
         self.tracked_names: set[str] = set()
         self.use_state = use_state and changes_path is None
         self.clear_output_on_all = clear_output_on_all
@@ -670,15 +676,24 @@ class StatefulScriptCompiler:
             for name in changed_names
             if (script := script_index.get(name)) is not None
         }
-        return self.compile(script_index.get_related(selected))
+        related = script_index.get_related(selected, compilable_only=False)
+        to_compile = {
+            script for script in related if script_index.is_compilable(script)
+        }
+        # Without old sources, changed includes may have previously had an entry
+        # point. Unchanged sources can lose theirs through entry-point aliases.
+        self.stale_names = self.removed_names | {
+            script.name
+            for script in related - to_compile
+            if script in selected or script.is_entrypoint_alias
+        }
+        return self.compile(to_compile)
 
     def _finish_cleanup(self) -> set[str]:
         """Prune removed state entries and owned outputs only after a successful run."""
 
         if not self.use_state:
-            return {
-                f"{name}.ncs" for name in self.removed_names
-            } - self.preserved_outputs
+            return {f"{name}.ncs" for name in self.stale_names} - self.preserved_outputs
         # Selectors do not process every pending include deletion. Retain those
         # hashes so the next incremental run still invalidates their dependents.
         if self.state_path is None or self.selector is not None:

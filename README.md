@@ -189,10 +189,12 @@ Stale build artifacts:
 
 The optional stale-artifact block is sorted and deduplicated. In `--changes`
 mode, these are deletion candidates for the build job to apply; arebuilder
-does not clear or delete existing outputs. Removed includes also produce an
-`.ncs` candidate, so deleting a nonexistent file must be harmless. A path that
-exists again in the current checkout is compiled rather than reported as
-deleted. Failed runs emit neither the completion line nor the stale-artifact
+does not clear or delete existing outputs. Changed sources without an entry
+point and affected entry-point aliases that are no longer executable also
+produce deletion candidates. Removed and changed include-only sources can
+therefore produce `.ncs` candidates that never existed; deleting a nonexistent
+file must be harmless. Restored files are classified using their current entry
+points. Failed runs emit neither the completion line nor the stale-artifact
 block.
 
 Treat compiled files as a delta: overlay them on the previous artifact,
