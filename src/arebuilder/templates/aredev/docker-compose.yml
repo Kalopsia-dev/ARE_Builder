@@ -71,6 +71,8 @@ services:
     container_name: aredevnwserver
     hostname: nwserver
     image: ${NWSERVER_IMAGE:-docker.io/dmhoodoo/aredevnwnxserver:latest}
+    # The server image is x86-64 only; ARM hosts must use emulation.
+    platform: linux/amd64
     security_opt:
       - label=disable
     env_file: ${AREDEV_CONFIG_ROOT:-.}/config/nwserver.env
