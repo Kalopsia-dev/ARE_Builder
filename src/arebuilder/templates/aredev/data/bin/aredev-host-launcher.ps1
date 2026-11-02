@@ -194,7 +194,7 @@ function Invoke-HostUpdate {
     & docker compose --progress quiet --project-directory $script:ProjectRootPath --env-file $script:ConfigFile -p $script:AredevProject down
     $downStatus = if ($null -eq $global:LASTEXITCODE) { 0 } else { $global:LASTEXITCODE }
     if ($downStatus -eq 0) {
-        & docker compose --progress quiet --project-directory $script:ProjectRootPath --env-file $script:ConfigFile -p $script:AredevProject pull --ignore-pull-failures
+        & docker compose --progress quiet --project-directory $script:ProjectRootPath --env-file $script:ConfigFile -p $script:AredevProject pull
         $pullStatus = if ($null -eq $global:LASTEXITCODE) { 0 } else { $global:LASTEXITCODE }
     }
     else {

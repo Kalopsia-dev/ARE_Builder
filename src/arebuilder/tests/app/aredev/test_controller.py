@@ -1,5 +1,6 @@
 import stat
 import sys
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 import pytest
@@ -676,8 +677,57 @@ def test_native_update_installs_repo_then_pulls_compose_images(
     assert controller.run("update", []) == 0
 
     assert runner.calls[0][-1] == f"git+{custom_repo}"
-    assert any(call[-2:] == ["pull", "--ignore-pull-failures"] for call in runner.calls)
+    assert runner.calls[-1][-1] == "pull"
     assert build_calls == []
+
+
+@pytest.mark.parametrize("backend", ["native", "docker"])
+def test_update_reports_pull_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    backend: str,
+) -> None:
+    """Propagate a failed image pull without announcing a successful update."""
+
+    output: list[str] = []
+    controller, layout, _, runner = make_controller(tmp_path, output=output.append)
+    _append_arebuilder_env(layout, f"BUILDER_BACKEND={backend}")
+    controller.config = load_arebuilder_env(layout.root)
+    monkeypatch.setattr(
+        "arebuilder.app.aredev.controller._installed_arebuilder_version",
+        lambda: "same",
+    )
+
+    def run(
+        args: Sequence[str],
+        *,
+        cwd: Path,
+        env: Mapping[str, str] | None,
+        capture_output: bool,
+        background: bool,
+        detach: bool = False,
+    ) -> ProcessResult:
+        if "pull" in args:
+            # Compose suppresses its failure status when this flag is present.
+            if "--ignore-pull-failures" in args:
+                return ProcessResult(0)
+            return ProcessResult(
+                7, stderr="Server image pull failed: registry unavailable.\n"
+            )
+        return runner(
+            args,
+            cwd=cwd,
+            env=env,
+            capture_output=capture_output,
+            background=background,
+            detach=detach,
+        )
+
+    controller.process_runner = run
+
+    assert controller.run("update", []) == 7
+    assert "Server image pull failed: registry unavailable." in output
+    assert not any("Update complete" in message for message in output)
 
 
 def test_native_update_restart_depends_on_package_change(

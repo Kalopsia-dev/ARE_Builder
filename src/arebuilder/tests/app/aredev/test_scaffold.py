@@ -450,10 +450,63 @@ def test_linux_host_launcher_uses_podman_when_docker_is_unhealthy(
         ),
         (
             "podman compose --env-file "
-            f"{config_path} -p aredev pull --ignore-pull-failures"
+            f"{config_path} -p aredev pull"
             f"|{podman_compose}|false"
         ),
     ]
+
+
+@pytest.mark.parametrize("pull_status", [0, 7])
+def test_host_update_reports_pull_status(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    pull_status: int,
+) -> None:
+    """Run the generated launcher and retain image-pull errors and exit status."""
+
+    _pretend_host_platform(monkeypatch, "linux")
+    project = tmp_path / "AREDev"
+    initialize_aredev_project(project)
+    nwn_install = tmp_path / "nwn-install"
+    nwn_install.mkdir()
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    docker = fake_bin / "docker"
+    docker.write_text(
+        '#!/bin/sh\n'
+        'case " $* " in\n'
+        '  *" pull "*)\n'
+        '    if [ "$PULL_STATUS" -ne 0 ]; then\n'
+        '      echo "Server image pull failed: registry unavailable." >&2\n'
+        '    fi\n'
+        '    case " $* " in *" --ignore-pull-failures "*) exit 0 ;; esac\n'
+        '    exit "$PULL_STATUS" ;;\n'
+        'esac\n',
+        encoding="utf-8",
+    )
+    docker.chmod(0o755)
+    lock = project / "temp" / "host-commands" / "update.lock"
+    lock.mkdir(parents=True)
+
+    completed = subprocess.run(
+        ["sh", str(project / "data/bin/aredev-host-launcher.sh"), "update", str(project)],
+        env={
+            **os.environ,
+            "PATH": str(fake_bin) + os.pathsep + os.environ["PATH"],
+            "CONTAINER_CLI": "docker",
+            "NWN_INSTALL_PATH": str(nwn_install),
+            "PULL_STATUS": str(pull_status),
+        },
+        text=True,
+        capture_output=True,
+        timeout=10,
+    )
+
+    assert completed.returncode == pull_status, completed.stderr
+    assert ("AREDev update complete." in completed.stdout) == (pull_status == 0)
+    if pull_status:
+        assert "Server image pull failed: registry unavailable." in completed.stderr
+    assert not lock.exists()
 
 
 def test_init_generates_profiler_dashboard_assets(

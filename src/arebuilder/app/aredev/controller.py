@@ -515,7 +515,7 @@ class AREDevController:
             if result.returncode != 0:
                 return self._report_process_failure(result)
         self.output("Updating containers...")
-        result = self._run_compose(["pull", "--ignore-pull-failures"])
+        result = self._run_compose(["pull"])
         return self._report_process_failure(result)
 
     def _handle_native_update_restart(

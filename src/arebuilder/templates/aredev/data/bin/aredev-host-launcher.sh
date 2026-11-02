@@ -293,7 +293,7 @@ run_host_update() {
     run_compose_cli --env-file "$CONFIG_FILE" -p "$AREDEV_PROJECT" down
     down_status=$?
     if [ "$down_status" -eq 0 ]; then
-        run_compose_cli --env-file "$CONFIG_FILE" -p "$AREDEV_PROJECT" pull --ignore-pull-failures
+        run_compose_cli --env-file "$CONFIG_FILE" -p "$AREDEV_PROJECT" pull
         pull_status=$?
     else
         pull_status=$down_status
