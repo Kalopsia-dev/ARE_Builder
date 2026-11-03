@@ -73,6 +73,26 @@ Common AREDev commands are:
 | `database [drop]` | Open the test database client, or reset database state with `drop`. |
 | `update` | Update native `arebuilder` from `AREBUILDER_REPO` and pull refreshed Docker images. |
 
+For native self-updates, launch AREDev with `python -m arebuilder aredev`, or run
+`python -m arebuilder aredev --root /path/to/AREDev update` for a one-shot update.
+Existing module-launching `AREDev.bat` files and POSIX `AREDev.sh` files work
+without regeneration. The `aredev` Python script entry point uses the same
+supervisor. Executable console launchers such as `aredev.exe` report the required
+module launcher before native self-update changes packages.
+
+The module launcher repairs the installed package's declared dependencies before
+starting AREDev. On update, it waits for AREDev to exit, installs the configured
+repository with dependencies, checks consistency, and refreshes containers in a
+fresh process. A saved continuation worker also handles older installed targets
+without asking their legacy updater to install again. Failed installation,
+dependency validation, or container refresh returns a nonzero status.
+Dependency validation covers the active environment,
+so unrelated existing conflicts can also fail the check.
+
+When upgrading from the older self-updater, close and reopen AREDev once to
+activate supervision. Its old Windows restart can mishandle project paths with
+spaces; reopening the existing launcher also recovers from that failure.
+
 ### Profiler Monitoring
 
 `aredev start` also starts InfluxDB and Grafana for local NWNX Profiler
