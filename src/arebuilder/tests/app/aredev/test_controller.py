@@ -1,4 +1,5 @@
 import stat
+import json
 import sys
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -677,11 +678,11 @@ def test_docker_backend_inside_builder_container_reuses_current_process(
     assert settings.server_root == layout.server_dir
 
 
-def test_native_update_installs_repo_then_pulls_compose_images(
+def test_native_update_requests_installation_after_worker_exit(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Verify native update refreshes arebuilder before pulling Compose images."""
+    """Keep pip and Docker out of the process that holds imported dependencies."""
 
     custom_repo = "https://example.invalid/ARE_Builder.git"
     runner = FakeRunner()
@@ -692,16 +693,16 @@ def test_native_update_installs_repo_then_pulls_compose_images(
         encoding="utf-8",
     )
     controller.config = load_arebuilder_env(layout.root)
-    fingerprints = iter(["same", "same"])
-    monkeypatch.setattr(
-        "arebuilder.app.aredev.controller._installed_arebuilder_version",
-        lambda: next(fingerprints),
-    )
+    request = tmp_path / "request.json"
+    monkeypatch.setenv("AREDEV_NATIVE_UPDATE_REQUEST", str(request))
 
-    assert controller.run("update", []) == 0
+    assert controller.run("update", []) == 75
 
-    assert runner.calls[0][-1] == f"git+{custom_repo}"
-    assert runner.calls[-1][-1] == "pull"
+    assert json.loads(request.read_text()) == {
+        "requirement": f"git+{custom_repo}",
+        "root": str(layout.root),
+    }
+    assert runner.calls == []
     assert build_calls == []
 
 
@@ -717,10 +718,6 @@ def test_update_reports_pull_failure(
     controller, layout, _, runner = make_controller(tmp_path, output=output.append)
     _append_arebuilder_env(layout, f"BUILDER_BACKEND={backend}")
     controller.config = load_arebuilder_env(layout.root)
-    monkeypatch.setattr(
-        "arebuilder.app.aredev.controller._installed_arebuilder_version",
-        lambda: "same",
-    )
 
     def run(
         args: Sequence[str],
@@ -749,38 +746,56 @@ def test_update_reports_pull_failure(
 
     controller.process_runner = run
 
-    assert controller.run("update", []) == 7
+    if backend == "native":
+        monkeypatch.setenv(
+            "AREDEV_NATIVE_UPDATE_REQUEST", str(tmp_path / "request.json")
+        )
+        monkeypatch.setattr(AREDevController, "from_root", lambda root: controller)
+        from arebuilder._native_update import _continue_worker
+
+        assert _continue_worker(["aredev", "--root", str(layout.root), "update"]) == 7
+    else:
+        assert controller.run("update", []) == 7
     assert "Server image pull failed: registry unavailable." in output
     assert not any("Update complete" in message for message in output)
 
 
-def test_native_update_restart_depends_on_package_change(
+def test_unsupervised_native_update_fails_before_mutation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Verify native update restart is gated by the package fingerprint."""
+    """Console launchers must not partially uninstall their own live executable."""
+    output = []
+    controller, _, _, runner = make_controller(tmp_path, output=output.append)
+    monkeypatch.delenv("AREDEV_NATIVE_UPDATE_REQUEST", raising=False)
+    assert controller.run("update", []) == 1
+    assert runner.calls == []
+    assert any("python -m arebuilder aredev" in line for line in output)
 
-    class Restarted(Exception):
-        pass
 
-    exec_calls: list[tuple[str, list[str]]] = []
-    controller, _, _, _ = make_controller(tmp_path)
-    controller._running_interactive = True
+@pytest.mark.parametrize("one_shot", [False, True])
+def test_updated_worker_refreshes_containers_without_repeating_install(
+    tmp_path, monkeypatch, one_shot
+):
+    """A fresh continuation refreshes images once and preserves invocation intent."""
+    from arebuilder._native_update import _continue_worker
 
-    def execv(executable: str, args: list[str]) -> None:
-        exec_calls.append((executable, args))
-        raise Restarted
-
-    monkeypatch.setattr("arebuilder.app.aredev.controller.os.execv", execv)
-
-    assert controller._handle_native_update_restart(False, 0) == 0
-    assert exec_calls == []
-    assert controller._handle_native_update_restart(True, 7) == 7
-    assert exec_calls == []
-    with pytest.raises(Restarted):
-        controller._handle_native_update_restart(True, 0)
-    assert exec_calls[0][0] == sys.executable
-    assert exec_calls[0][1][:4] == [sys.executable, "-m", "arebuilder", "aredev"]
+    controller, layout, _, _ = make_controller(tmp_path)
+    calls = []
+    monkeypatch.setattr(AREDevController, "from_root", lambda root: controller)
+    monkeypatch.setattr(
+        controller, "_update_containers", lambda: calls.append("containers") or 0
+    )
+    monkeypatch.setattr(
+        controller, "run_interactive", lambda: calls.append("prompt") or 29
+    )
+    monkeypatch.setattr(
+        controller, "update", lambda: pytest.fail("Continuation must not install twice")
+    )
+    monkeypatch.setenv("AREDEV_NATIVE_UPDATE_REQUEST", str(tmp_path / "request.json"))
+    argv = ["aredev", "--root", str(layout.root), *(["update"] if one_shot else [])]
+    assert _continue_worker(argv) == (0 if one_shot else 29)
+    assert calls == (["containers"] if one_shot else ["containers", "prompt"])
 
 
 def test_interactive_prompt_runs_commands_until_exit(tmp_path: Path) -> None:
