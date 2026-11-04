@@ -805,7 +805,7 @@ def test_archived_script_change_invalidates_outputs_with_unchanged_key(
     }
 
     class FakeKeyReader:
-        filenames = list(archive)
+        filenames = tuple(archive)
 
         def __init__(self, path: str) -> None:
             pass
