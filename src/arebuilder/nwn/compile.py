@@ -1206,11 +1206,21 @@ def write_hash_index(path: Path, hash_index: dict[str, int], compiler: str) -> N
 
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
-            json.dumps({"compiler": compiler, "scripts": hash_index}), encoding="utf-8"
-        )
+        state = {"compiler": compiler, "scripts": hash_index}
+        _write_atomic(path, json.dumps(state).encode())
     except OSError as exc:
         raise CompileError(f"E: Unable to store script hashes ({exc})") from exc
+
+
+def _write_atomic(path: Path, data: bytes) -> None:
+    """Replace a file in one step so interrupted writes never leave partial data."""
+
+    temp_path = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    try:
+        temp_path.write_bytes(data)
+        os.replace(temp_path, path)
+    finally:
+        temp_path.unlink(missing_ok=True)
 
 
 def delete_hash_index(path: Path) -> None:

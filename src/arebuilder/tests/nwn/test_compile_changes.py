@@ -790,3 +790,21 @@ def test_compiler_or_game_script_change_invalidates_saved_state(
 
     monkeypatch.setattr(script_compile, "version", lambda _name: "0.0.0")
     assert compile_scripts(**options).compiled_count == 2
+
+
+def test_interrupted_state_write_keeps_previous_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state = tmp_path / "state.json"
+    script_compile.write_hash_index(state, {"first": 1}, "compiler")
+    previous = state.read_bytes()
+
+    def interrupted_replace(*_args: object) -> None:
+        raise OSError("interrupted")
+
+    monkeypatch.setattr(script_compile.os, "replace", interrupted_replace)
+    with pytest.raises(CompileError):
+        script_compile.write_hash_index(state, {"second": 2}, "compiler")
+
+    assert state.read_bytes() == previous
+    assert list(tmp_path.iterdir()) == [state]
