@@ -239,10 +239,9 @@ class ScriptIndex:
             script for script in self.primary_scripts() if self.is_compilable(script)
         }
 
-    def get_modified(self, state_path: Path) -> set[Script]:
+    def get_modified(self, hash_index: dict[str, int]) -> set[Script]:
         """Return indexed local scripts whose content hash differs from saved state."""
 
-        hash_index = read_hash_index(state_path)
         return {
             script
             for script in self
@@ -742,7 +741,7 @@ class StatefulScriptCompiler:
                     if path.is_file() or path.is_symlink():
                         path.unlink()
                         stale_outputs.add(filename)
-        hashes = read_hash_index(self.state_path)
+        hashes = self._saved_hashes()
         current = {
             script.name
             for script in script_index
@@ -809,7 +808,7 @@ class StatefulScriptCompiler:
         if self.state_path is None:
             raise CompileError("A state path is required for modified compilation.")
 
-        modified = script_index.get_modified(state_path=self.state_path)
+        modified = script_index.get_modified(self._saved_hashes())
         modified.update(
             script
             for name in self.removed_names
@@ -1034,8 +1033,18 @@ class StatefulScriptCompiler:
 
         if self.state_path is None or not self.use_state:
             return False
-        # State from another compiler or game data describes stale outputs.
-        return _read_state(self.state_path).get("compiler") == self.compiler_fingerprint
+        return "scripts" in _read_state(self.state_path)
+
+    def _saved_hashes(self) -> dict[str, int]:
+        """Return saved hashes, invalidated if the compiler or game scripts changed."""
+
+        assert self.state_path is not None
+        state = _read_state(self.state_path)
+        hashes = state.get("scripts", {})
+        if state.get("compiler") != self.compiler_fingerprint:
+            # Keep the names, which own their outputs, but match no source.
+            return dict.fromkeys(hashes, 0)
+        return hashes
 
     @cached_property
     def compiler_fingerprint(self) -> str:
@@ -1053,7 +1062,7 @@ class StatefulScriptCompiler:
             return None
         if self.state_path is None:
             raise CompileError("A state path is required to update script hashes.")
-        hashes = read_hash_index(self.state_path)
+        hashes = self._saved_hashes()
         hashes.update(
             {
                 script.name: script.hash
@@ -1219,14 +1228,17 @@ def read_hash_index(path: Path) -> dict[str, int]:
 
 
 def _read_state(path: Path) -> dict:
-    """Load a state file, treating missing, unreadable, or older formats as empty."""
+    """Load a state file, treating missing or unreadable files as empty."""
 
     try:
         state = json.loads(path.read_text(encoding="utf-8"))
     except (FileNotFoundError, ValueError):
         return {}
-    if not isinstance(state, dict) or not isinstance(state.get("scripts"), dict):
+    if not isinstance(state, dict):
         return {}
+    if not isinstance(state.get("scripts"), dict):
+        # Older state files stored the hashes at the top level.
+        return {"scripts": state}
     return state
 
 

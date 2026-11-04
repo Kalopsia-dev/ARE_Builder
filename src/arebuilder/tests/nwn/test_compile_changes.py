@@ -792,6 +792,50 @@ def test_compiler_or_game_script_change_invalidates_saved_state(
     assert compile_scripts(**options).compiled_count == 2
 
 
+@pytest.mark.parametrize(
+    "previous_state",
+    [{"tracked": 1}, {"compiler": "other", "scripts": {"tracked": 1}}],
+)
+@pytest.mark.parametrize("remove_sources", [False, True])
+def test_outdated_state_keeps_output_ownership(
+    tmp_path: Path, previous_state: dict, remove_sources: bool
+) -> None:
+    """Invalidated state recompiles its scripts without sweeping other outputs."""
+
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    (scripts / "tracked.nss").write_text("void main() {}")
+    output = tmp_path / "output"
+    live = tmp_path / "live"
+    for directory in (output, live):
+        directory.mkdir()
+        (directory / "tracked.ncs").write_bytes(b"old")
+        (directory / "untracked.ncs").write_bytes(b"keep")
+    state = tmp_path / "state.json"
+    state.write_text(json.dumps(previous_state))
+    if remove_sources:
+        (scripts / "tracked.nss").unlink()
+        scripts.rmdir()
+
+    result = compile_scripts(
+        script_dir=scripts,
+        output_dir=output,
+        secondary_output_dir=live,
+        state_path=state,
+        compiler_factory=fake_compiler_factory,
+    )
+
+    assert result.compiled_count == int(not remove_sources)
+    for directory in (output, live):
+        assert (directory / "untracked.ncs").read_bytes() == b"keep"
+        assert (directory / "tracked.ncs").exists() != remove_sources
+    if not remove_sources:
+        assert (output / "tracked.ncs").read_bytes() == b"compiled:tracked"
+    assert set(json.loads(state.read_text())["scripts"]) == (
+        set() if remove_sources else {"tracked"}
+    )
+
+
 def test_interrupted_state_write_keeps_previous_state(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
