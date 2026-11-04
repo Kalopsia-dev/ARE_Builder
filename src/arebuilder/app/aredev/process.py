@@ -48,11 +48,16 @@ def default_process_runner(
         subprocess.Popen(list(args), **popen_kwargs)
         return ProcessResult(returncode=0)
 
+    # Container CLIs print UTF-8, and server logs may contain arbitrary bytes.
+    # Decoding with the Windows ANSI code page would fail on those bytes and
+    # drop the whole output, so decode as UTF-8 and replace bad bytes.
     completed = subprocess.run(
         list(args),
         cwd=cwd,
         env=dict(env or os.environ),
         text=True,
+        encoding="utf-8",
+        errors="replace",
         capture_output=capture_output,
     )
     return ProcessResult(

@@ -72,6 +72,40 @@ Common AREDev commands are:
 | `nwn [dm]` | Launch the NWN client and connect to the local server. |
 | `database [drop]` | Open the test database client, or reset database state with `drop`. |
 | `update` | Update native `arebuilder` from `AREBUILDER_REPO` and pull refreshed Docker images. |
+| `slot <command>` | Run disposable test servers next to the main one (see below). |
+
+### Parallel Test Slots
+
+`slot` runs up to four isolated copies of the test server next to the main one, so
+several people or scripts can test at the same time. Slot `N` is the Compose project
+`aredev-slotN`: the project's `docker-compose.yml` plus a generated override that gives
+it its own MariaDB volume, its own copy of the NWN home folder (vaults, settings and
+`development` without live-compiled `.ncs` files), its own logs and UDP port
+`NWN_PORT + N`. The built module and `override` folder are shared read-only, so run
+`build` first.
+
+```bash
+N=$(aredev slot claim "my-test")         # prints the slot number
+aredev slot install $N my_test.ncs        # into slot N's development folder
+aredev slot run $N -e NWNX_UTIL_PRE_MODULE_START_SCRIPT=my_test --wait "TEST DONE"
+aredev slot logs $N --tail 50
+aredev slot sql $N "SHOW TABLES"
+aredev slot status
+aredev slot release $N                    # delete containers, database and files
+```
+
+`slot run` waits for `Server: Module loaded` unless `--wait REGEX` is given (`--timeout`
+defaults to 600 seconds) and accepts `-e KEY=VALUE` and `-v HOST:/container/path[:ro]`
+for that run. Slots manage Docker directly, so run them from a host shell with a native
+`arebuilder`, not from the Dockerized builder prompt.
+
+`slot run N --servers K` starts `K` servers (up to four) on the slot's database, for
+example to test transfers between servers. Server `I` runs as
+`aredev-slotN-nwserver-I` (the first keeps its usual name) on port
+`NWN_PORT + N + 4 * (I - 1)` with its own NWN home copy and logs and the first
+server's server vault. `install` copies into every server unless `--server I` is
+given, which is how each server gets its own configuration files; a module's own
+server registration can be set up with `slot sql`.
 
 ### Profiler Monitoring
 

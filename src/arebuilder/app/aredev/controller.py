@@ -52,6 +52,7 @@ from arebuilder.app.aredev.project import (
     load_arebuilder_env,
     load_env_file,
 )
+from arebuilder.app.aredev.slots import SLOT_SUBCOMMANDS, run_slot_command
 from arebuilder.builder.symlinks import (
     PlannedSymlink,
     apply_symlink_plan,
@@ -80,6 +81,7 @@ AREDEV_COMMANDS = (
     "database",
     "nwn",
     "toolset",
+    "slot",
     "help",
     "clear",
     "exit",
@@ -96,11 +98,13 @@ AREDEV_COMMAND_HANDLERS = {
     "database": ("database", True),
     "nwn": ("nwn", True),
     "toolset": ("toolset", True),
+    "slot": ("slot", True),
 }
 AREDEV_SUBCOMMANDS = {
     "database": ("drop",),
     "nwn": ("dm",),
     "toolset": ("run",),
+    "slot": SLOT_SUBCOMMANDS,
 }
 
 
@@ -777,6 +781,17 @@ class AREDevController:
             self.output("Launching toolset...")
         return status
 
+    def slot(self, args: list[str]) -> int:
+        """Run a parallel test-server slot command."""
+
+        if _in_builder_container():
+            self.output(
+                "Slot commands manage Docker directly. Run "
+                "'arebuilder aredev slot ...' from the project root on the host."
+            )
+            return 1
+        return run_slot_command(self, args)
+
     def _run_configured_builder(
         self,
         command: str,
@@ -995,8 +1010,14 @@ class AREDevController:
         *,
         extra_env: Mapping[str, str] | None = None,
         capture_output: bool = False,
+        project: str = AREDEV_PROJECT,
+        compose_files: Sequence[Path] = (),
     ) -> ProcessResult:
-        """Run Docker Compose locally or delegate it to the host launcher bridge."""
+        """Run Docker Compose locally or delegate it to the host launcher bridge.
+
+        ``project`` and ``compose_files`` select another Compose project, such as
+        a slot; the host bridge only runs the main project.
+        """
 
         self._ensure_compose_support_files()
         if _in_builder_container():
@@ -1013,7 +1034,13 @@ class AREDevController:
                 compose_env.setdefault("PODMAN_COMPOSE_PROVIDER", podman_compose)
                 compose_env.setdefault("PODMAN_COMPOSE_WARNING_LOGS", "false")
         return self._run_container_command(
-            [*compose_args, "-p", AREDEV_PROJECT, *args],
+            [
+                *compose_args,
+                "-p",
+                project,
+                *(arg for path in compose_files for arg in ("-f", str(path))),
+                *args,
+            ],
             cwd=self.layout.root,
             env=compose_env,
             capture_output=capture_output,

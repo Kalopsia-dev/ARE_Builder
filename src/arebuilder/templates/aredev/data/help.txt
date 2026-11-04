@@ -23,6 +23,9 @@ Usage:
                            If "drop" is specified it will wipe the existing database data
                            and initialize from the latest schema on next run.
 
+    slot <command>       : Runs disposable test servers next to the AREDev Test Server.
+                           Enter "slot" to list its commands.
+
     help                 : Displays this usage information.
 
     exit                 : Exits this utility.
