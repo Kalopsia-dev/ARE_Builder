@@ -896,3 +896,41 @@ def test_cache_dir_compiles_each_source_and_include_combination_once(
 
     include.write_text("int helper() { return 1; }")
     assert compile_all("reverted") == []
+
+
+@pytest.mark.parametrize("stateful", [False, True])
+def test_project_nwscript_override_invalidates_cached_outputs(
+    tmp_path: Path, stateful: bool
+) -> None:
+    """The compiler reads nwscript.nss implicitly, even when no script includes it."""
+
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    nwscript = scripts / "nwscript.nss"
+    nwscript.write_text("void First();\nvoid Second();")
+    (scripts / "caller.nss").write_text("void main() { Second(); }")
+    compiled: list[str] = []
+
+    class RecordingCompiler:
+        def compile(self, script_name: str) -> bytes:
+            compiled.append(script_name)
+            return f"compiled:{script_name}".encode()
+
+    def compile_caller() -> list[str]:
+        compiled.clear()
+        compile_scripts(
+            script_dir=scripts,
+            output_dir=tmp_path / "output",
+            selector=None if stateful else "all",
+            state_path=tmp_path / "state.json",
+            use_state=stateful,
+            cache_dir=None if stateful else tmp_path / "cache",
+            compiler_factory=lambda _resolver: RecordingCompiler(),
+        )
+        return compiled
+
+    assert compile_caller() == ["caller.nss"]
+    assert compile_caller() == []
+
+    nwscript.write_text("void Second();\nvoid First();")
+    assert compile_caller() == ["caller.nss"]

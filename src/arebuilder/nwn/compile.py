@@ -1053,6 +1053,8 @@ class StatefulScriptCompiler:
         digest = sha256(f"nwn {version('nwn')} {COMPILER_OPTIONS}".encode())
         for source in self.game_scripts.sources:
             digest.update(source.fingerprint())
+        # The compiler loads nwscript.nss implicitly, from the project if overridden.
+        digest.update(sha256(self.load_script("nwscript.nss") or b"").digest())
         return digest.hexdigest()
 
     def _apply_hashes(self, modified: set[Script]) -> dict[str, int] | None:
