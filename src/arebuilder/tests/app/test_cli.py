@@ -352,7 +352,7 @@ def test_target_compile_cleanup_preserves_precompiled_fallback(
 
     assert (fixture.build_dir / "fixture_precompiled.ncs").read_bytes() == b"fallback"
     state = fixture.root / "temp" / "script_index_synthetic.json"
-    assert "fixture_precompiled" not in json.loads(state.read_text())
+    assert "fixture_precompiled" not in json.loads(state.read_text())["scripts"]
 
 
 @pytest.mark.parametrize(

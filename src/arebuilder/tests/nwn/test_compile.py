@@ -431,7 +431,7 @@ def test_modified_compile_initialises_state_then_noops_when_unchanged(
         "main_one.ncs",
         "main_two.ncs",
     }
-    assert set(json.loads(state_path.read_text(encoding="utf-8"))) == {
+    assert set(json.loads(state_path.read_text(encoding="utf-8"))["scripts"]) == {
         "inc_shared",
         "main_one",
         "main_two",
@@ -719,7 +719,7 @@ def test_stateful_target_compile_tracks_shared_include_changes(
     assert second_result.compiled_count == 0
     assert changed_include_result.compiled_count == 1
     assert {path.name for path in output_dir.glob("*.ncs")} == {"target_main.ncs"}
-    assert json.loads(state_path.read_text(encoding="utf-8")).keys() == {
+    assert json.loads(state_path.read_text(encoding="utf-8"))["scripts"].keys() == {
         "inc_shared",
         "target_main",
     }

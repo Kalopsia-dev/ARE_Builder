@@ -8,9 +8,10 @@ from collections import deque
 from collections.abc import Callable, Iterable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from functools import lru_cache
+from functools import cached_property, lru_cache
 from graphlib import CycleError, TopologicalSorter
 from hashlib import sha256
+from importlib.metadata import version
 from pathlib import Path, PurePosixPath
 from typing import Protocol
 
@@ -405,6 +406,18 @@ class GameScriptSource:
             self._cache[script_name] = contents
             return contents
 
+    def fingerprint(self) -> bytes:
+        """Return a digest that changes whenever the scripts in this source change."""
+
+        if self.reader is not None:
+            # Game updates ship a new key file alongside changed archives.
+            return sha256(self.path.read_bytes()).digest()
+        digest = sha256()
+        for script_name in sorted(self.scripts):
+            digest.update(script_name.encode() + b"\0")
+            digest.update(sha256(self.get(script_name) or b"").digest())
+        return digest.digest()
+
     def close(self) -> None:
         """Release archive handles and cached script data owned by this source."""
 
@@ -735,7 +748,7 @@ class StatefulScriptCompiler:
         }
         retained = {name: value for name, value in hashes.items() if name in current}
         if retained != hashes:
-            write_hash_index(self.state_path, retained)
+            write_hash_index(self.state_path, retained, self.compiler_fingerprint)
         return stale_outputs
 
     def compile_script(self, script_name: str) -> CompileResult:
@@ -870,7 +883,9 @@ class StatefulScriptCompiler:
                 and self.use_state
                 and self.state_path is not None
             ):
-                write_hash_index(self.state_path, new_hash_index)
+                write_hash_index(
+                    self.state_path, new_hash_index, self.compiler_fingerprint
+                )
             return CompileResult(compiled_count=0)
 
         self._validate_game_script_sources()
@@ -952,7 +967,7 @@ class StatefulScriptCompiler:
         if new_hash_index is not None and self.use_state:
             if self.state_path is None:
                 raise CompileError("A state path is required to write script hashes.")
-            write_hash_index(self.state_path, new_hash_index)
+            write_hash_index(self.state_path, new_hash_index, self.compiler_fingerprint)
 
         compile_time = time.time() - self.start_time
         if not self.ci:
@@ -991,9 +1006,19 @@ class StatefulScriptCompiler:
     def _has_state(self) -> bool:
         """Return whether a saved hash index is available for stateful compilation."""
 
-        if self.state_path is None:
+        if self.state_path is None or not self.use_state:
             return False
-        return self.use_state and self.state_path.exists()
+        # State from another compiler or game data describes stale outputs.
+        return _read_state(self.state_path).get("compiler") == self.compiler_fingerprint
+
+    @cached_property
+    def compiler_fingerprint(self) -> str:
+        """Identify the compiler and game scripts that compiled outputs depend on."""
+
+        digest = sha256(f"nwn {version('nwn')} {COMPILER_OPTIONS}".encode())
+        for source in self.game_scripts.sources:
+            digest.update(source.fingerprint())
+        return digest.hexdigest()
 
     def _apply_hashes(self, modified: set[Script]) -> dict[str, int] | None:
         """Merge modified-script hashes into the persisted hash index."""
@@ -1161,17 +1186,29 @@ def _path_text_looks_windows(path: str) -> bool:
 def read_hash_index(path: Path) -> dict[str, int]:
     """Load script hashes from a state file."""
 
-    if path.exists():
-        return json.loads(path.read_text(encoding="utf-8"))
-    return {}
+    return _read_state(path).get("scripts", {})
 
 
-def write_hash_index(path: Path, hash_index: dict[str, int]) -> None:
-    """Write script hashes to a state file."""
+def _read_state(path: Path) -> dict:
+    """Load a state file, treating missing, unreadable, or older formats as empty."""
+
+    try:
+        state = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, ValueError):
+        return {}
+    if not isinstance(state, dict) or not isinstance(state.get("scripts"), dict):
+        return {}
+    return state
+
+
+def write_hash_index(path: Path, hash_index: dict[str, int], compiler: str) -> None:
+    """Write script hashes and the compiler fingerprint to a state file."""
 
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(hash_index), encoding="utf-8")
+        path.write_text(
+            json.dumps({"compiler": compiler, "scripts": hash_index}), encoding="utf-8"
+        )
     except OSError as exc:
         raise CompileError(f"E: Unable to store script hashes ({exc})") from exc
 
