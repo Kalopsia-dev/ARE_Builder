@@ -530,10 +530,12 @@ class StatefulScriptCompiler:
         changes_path: Path | None = None,
         ci: bool = False,
         preserved_outputs: Iterable[str] = (),
+        cache_dir: Path | None = None,
     ) -> None:
         """Initialize the instance with its required collaborators and state."""
 
         self.script_dir = script_dir.absolute()
+        self.cache_dir = cache_dir
         self.output_dir = output_dir
         self.selector = selector
         self.state_path = state_path
@@ -894,6 +896,13 @@ class StatefulScriptCompiler:
         init_lock = threading.Lock()
         thread_local = threading.local()
         progress = None if self.ci else ProgressBar(total=len(script_set))
+        cache_paths: dict[Script, Path] = {}
+        if self.cache_dir is not None:
+            self.cache_dir.mkdir(parents=True, exist_ok=True)
+            cache_paths = {
+                script: self.cache_dir / f"{self._cache_key(script)}.ncs"
+                for script in script_set
+            }
 
         def init_compiler() -> None:
             """Create the thread-local compiler instance for worker threads."""
@@ -907,11 +916,17 @@ class StatefulScriptCompiler:
             """Compile one script inside the worker pool and normalize backend return shapes."""
 
             try:
-                if self.ci:
-                    with init_lock:
-                        print(f"Compiling {script.name}.nss", flush=True)
-                compiled = thread_local.compiler.compile(f"{script.name}.nss")
-                ncs_bytes = compiled[0] if isinstance(compiled, tuple) else compiled
+                cache_path = cache_paths.get(script)
+                if cache_path is not None and cache_path.is_file():
+                    ncs_bytes = cache_path.read_bytes()
+                else:
+                    if self.ci:
+                        with init_lock:
+                            print(f"Compiling {script.name}.nss", flush=True)
+                    compiled = thread_local.compiler.compile(f"{script.name}.nss")
+                    ncs_bytes = compiled[0] if isinstance(compiled, tuple) else compiled
+                    if cache_path is not None and ncs_bytes is not None:
+                        _write_atomic(cache_path, ncs_bytes)
                 if progress is not None:
                     progress.update()
                 return f"{script.name}.ncs", ncs_bytes
@@ -973,6 +988,15 @@ class StatefulScriptCompiler:
         if not self.ci:
             print(f"Success!\n\nTotal Execution time = {compile_time:.4f} seconds\n")
         return CompileResult(compiled_count=len(compiled))
+
+    def _cache_key(self, script: Script) -> str:
+        """Identify a script's output by its source, includes, and compiler."""
+
+        key = " ".join(
+            [self.compiler_fingerprint, script.name, str(script.hash)]
+            + sorted(f"{include.name}:{include.hash}" for include in script.includes)
+        )
+        return sha256(key.encode()).hexdigest()
 
     def load_script(self, script_name: str) -> bytes | None:
         """Load a custom script first, then fall back to base-game sources."""
@@ -1085,6 +1109,7 @@ def compile_scripts(
     changes_path: Path | None = None,
     ci: bool = False,
     preserved_outputs: Iterable[str] = (),
+    cache_dir: Path | None = None,
 ) -> CompileResult:
     """Compile NWScript sources using saved state or an explicit changes file."""
 
@@ -1103,6 +1128,7 @@ def compile_scripts(
         changes_path=changes_path,
         ci=ci,
         preserved_outputs=preserved_outputs,
+        cache_dir=cache_dir,
     )
     return compiler.run()
 

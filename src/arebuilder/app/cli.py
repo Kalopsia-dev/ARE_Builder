@@ -82,6 +82,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             settings=settings,
             changes_path=args.changes,
             ci=args.ci,
+            cache_dir=args.cache_dir,
         )
     except CliArgumentError as exc:
         print(f"Invalid arguments: {exc}", flush=True)
@@ -146,6 +147,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "--changes",
         type=Path,
         help="TeamCity changed-files list for stateless compilation (CLI-only).",
+    )
+    parser.add_argument(
+        "--cache-dir",
+        type=Path,
+        help="Reuse compiled scripts from a content-addressed cache (CLI-only).",
     )
     parser.add_argument(
         "--ci",

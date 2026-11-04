@@ -808,3 +808,47 @@ def test_interrupted_state_write_keeps_previous_state(
 
     assert state.read_bytes() == previous
     assert list(tmp_path.iterdir()) == [state]
+
+
+def test_cache_dir_compiles_each_source_and_include_combination_once(
+    tmp_path: Path,
+) -> None:
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    include = scripts / "inc_shared.nss"
+    include.write_text("int helper() { return 1; }")
+    (scripts / "dependent.nss").write_text(
+        '#include "inc_shared"\nvoid main() { int x = helper(); }'
+    )
+    (scripts / "unrelated.nss").write_text("void main() {}")
+    compiled: list[str] = []
+
+    class RecordingCompiler:
+        def compile(self, script_name: str) -> bytes:
+            compiled.append(script_name)
+            return f"compiled:{script_name}".encode()
+
+    def compile_all(output_name: str) -> list[str]:
+        compiled.clear()
+        compile_scripts(
+            script_dir=scripts,
+            output_dir=tmp_path / output_name,
+            selector="all",
+            use_state=False,
+            cache_dir=tmp_path / "cache",
+            compiler_factory=lambda _resolver: RecordingCompiler(),
+        )
+        return sorted(compiled)
+
+    assert compile_all("first") == ["dependent.nss", "unrelated.nss"]
+    assert compile_all("second") == []
+    assert {
+        path.name: path.read_bytes() for path in (tmp_path / "second").iterdir()
+    } == {path.name: path.read_bytes() for path in (tmp_path / "first").iterdir()}
+
+    include.write_text("int helper() { return 2; }")
+    assert compile_all("changed") == ["dependent.nss"]
+    assert compile_all("changed_again") == []
+
+    include.write_text("int helper() { return 1; }")
+    assert compile_all("reverted") == []
