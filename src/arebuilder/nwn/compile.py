@@ -15,7 +15,7 @@ from pathlib import Path, PurePosixPath
 from typing import Protocol
 
 from nwn.key import Reader as KeyReader
-from nwn.nwscript.comp import CompilationError
+from nwn.nwscript.comp import CompilationError, Optimization
 from nwn.nwscript.comp import Compiler as NwScriptCompiler
 
 
@@ -31,6 +31,13 @@ class CompilerBackend(Protocol):
 
 
 CompilerFactory = Callable[[Callable[[str], bytes | None]], CompilerBackend]
+# Match the game, toolset, and nwn_script_comp default (-O1). The library
+# default also removes dead branches, which produces different bytecode.
+COMPILER_OPTIONS = {
+    "debug_info": False,
+    "max_include_depth": 64,
+    "optimizations": {Optimization.DEAD_FUNCTIONS},
+}
 MIN_COMPILER_THREAD_STACK_SIZE = 8 * 1024 * 1024
 _compiler_thread_stack_lock = threading.Lock()
 _compiler_thread_stack_configured = False
@@ -1179,11 +1186,7 @@ def delete_hash_index(path: Path) -> None:
 def _create_nwn_compiler(resolver: Callable[[str], bytes | None]) -> CompilerBackend:
     """Create the pinned third-party NWScript compiler backend with project resolver hooks."""
 
-    return NwScriptCompiler(
-        resolver=resolver,
-        debug_info=False,
-        max_include_depth=64,
-    )
+    return NwScriptCompiler(resolver=resolver, **COMPILER_OPTIONS)
 
 
 def _ensure_compiler_thread_stack_size() -> None:

@@ -226,6 +226,21 @@ def test_entrypoint_layouts_reach_native_compiler(
         assert (output_dir / "executable.ncs").read_bytes().startswith(b"NCS V1.0")
 
 
+def test_default_compiler_uses_game_optimization_level(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The game and toolset only remove dead functions (nwn_script_comp -O1)."""
+
+    created: dict[str, object] = {}
+    monkeypatch.setattr(
+        script_compile, "NwScriptCompiler", lambda **kwargs: created.update(kwargs)
+    )
+
+    script_compile._create_nwn_compiler(lambda _name: None)
+
+    assert created["optimizations"] == {script_compile.Optimization.DEAD_FUNCTIONS}
+
+
 def test_default_compiler_reports_missing_nwscript_before_compiling(
     tmp_path: Path,
 ) -> None:
