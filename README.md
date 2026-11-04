@@ -99,6 +99,14 @@ defaults to 600 seconds) and accepts `-e KEY=VALUE` and `-v HOST:/container/path
 for that run. Slots manage Docker directly, so run them from a host shell with a native
 `arebuilder`, not from the Dockerized builder prompt.
 
+`slot run N --servers K` starts `K` servers (up to four) on the slot's database, for
+example to test transfers between servers. Server `I` runs as
+`aredev-slotN-nwserver-I` (the first keeps its usual name) on port
+`NWN_PORT + N + 4 * (I - 1)` with its own NWN home copy and logs and the first
+server's server vault. `install` copies into every server unless `--server I` is
+given, which is how each server gets its own configuration files; a module's own
+server registration can be set up with `slot sql`.
+
 ### Profiler Monitoring
 
 `aredev start` also starts InfluxDB and Grafana for local NWNX Profiler

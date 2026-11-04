@@ -102,7 +102,7 @@ def test_run_starts_database_then_server_and_waits_for_log(tmp_path: Path) -> No
     assert _compose_calls(runner, "aredev-slot1") == [
         ["up", "-d", "db"],
         ["exec", "-T", "db", "mysqladmin", "ping", "-h127.0.0.1", "--silent"],
-        ["up", "-d", "--no-deps", "--force-recreate", "nwserver"],
+        ["up", "-d", "--no-deps", "--force-recreate", "--remove-orphans", "nwserver"],
     ]
     server_start = next(i for i, call in enumerate(runner.calls) if "nwserver" in call)
     assert runner.envs[server_start]["NWN_MODULE"] == controller.config.module_name
@@ -198,3 +198,41 @@ def test_slot_commands_are_refused_inside_builder_container(
     assert controller.run("slot", ["status"]) == 1
     assert "on the host" in output[-1]
     assert runner.calls == []
+
+
+def test_run_with_several_servers_shares_database_and_vault(tmp_path: Path) -> None:
+    """Extra servers extend the main service with their own home, logs and port."""
+
+    runner = SlotRunner(server_log="Server: Module loaded\n")
+    controller, layout, runner, output = _make(tmp_path, runner)
+    controller.run("slot", ["claim"])
+    script = tmp_path / "test_script.ncs"
+    script.write_bytes(b"ncs")
+
+    assert controller.run("slot", ["run", "1", "--servers", "2"]) == 0
+    assert controller.run("slot", ["install", "1", str(script)]) == 0
+    assert controller.run("slot", ["install", "1", "--server", "3", str(script)]) == 1
+
+    pool = slots.Slots(controller)
+    assert _compose_calls(runner, "aredev-slot1")[-1] == [
+        "up",
+        "-d",
+        "--no-deps",
+        "--force-recreate",
+        "--remove-orphans",
+        "nwserver",
+        "nwserver-2",
+    ]
+    override = pool.override_file(1).read_text(encoding="utf-8")
+    assert (
+        f'"file": "{layout.compose_file.as_posix()}", "service": "nwserver"' in override
+    )
+    assert 'ports: !override ["5126:5126/udp"]' in override
+    vault = (pool.home_dir(1) / "servervault").as_posix()
+    assert f'"source": "{vault}", "target": "/nwn/home/servervault"' in override
+    assert not any((pool.server_home(1, 2) / "servervault").iterdir())
+    assert "aredev-slot1-nwserver-2: matched /Server: Module loaded/." in output
+    for server in (1, 2):
+        development = pool.server_home(1, server) / "development"
+        assert (development / "test_script.ncs").is_file()
+    assert output[-1] == "Slot 1 has no server 3."

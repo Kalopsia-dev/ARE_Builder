@@ -6,6 +6,10 @@ Slot N is the Compose project ``aredev-slotN``: the project's
 log folder and UDP port (``NWN_PORT + N``). The built module and override
 content are shared read-only with the main server.
 
+``run --servers K`` adds servers ``nwserver-2`` .. ``nwserver-K`` on the same
+database and network. Each has its own NWN home copy, logs and port and
+shares the first server's server vault, so characters can move between them.
+
 The slot folder doubles as the claim: creating it claims the slot and
 ``release`` deletes it together with the slot's containers and database.
 """
@@ -29,6 +33,7 @@ if TYPE_CHECKING:
     from arebuilder.app.aredev.controller import AREDevController
 
 SLOT_COUNT = 4
+MAX_SERVERS = 4
 SLOT_PREFIX = "aredev-slot"
 DEFAULT_WAIT_PATTERN = "Server: Module loaded"
 DEFAULT_TIMEOUT_SECONDS = 600.0
@@ -44,9 +49,12 @@ Usage: slot <command> [arguments]
         -v HOST:PATH[:ro]   Extra bind mount (repeatable).
         --wait REGEX        Log line to wait for (default: "{DEFAULT_WAIT_PATTERN}").
         --timeout SECONDS   How long to wait (default: {DEFAULT_TIMEOUT_SECONDS:g}).
+        --servers K         Run K servers (up to {MAX_SERVERS}) on the slot's database.
     logs N [options]       Show slot N's server log; options are passed to "docker logs".
     sql N QUERY            Run QUERY in slot N's database.
-    install N FILE...      Copy files into slot N's development folder.
+    install N [--server I] FILE...
+                           Copy files into the development folder of every server
+                           of slot N, or of server I only.
     status                 List the slots and who claimed them.
     release N              Delete slot N's containers, database and files."""
 
@@ -100,11 +108,34 @@ class Slots:
 
         return f"{self.project(number)}-{service}"
 
-    def port(self, number: int) -> int:
-        """Return slot N's UDP port: the main server's NWN_PORT plus N."""
+    def port(self, number: int, server: int = 1) -> int:
+        """Return a slot server's UDP port.
+
+        Server 1 of slot N uses the main server's NWN_PORT plus N; further
+        servers step by the slot count so ports never overlap between slots.
+        """
 
         env_values = load_env_file(self.layout.nwserver_env_path)
-        return int(env_values.get("NWN_PORT", "5121")) + number
+        base = int(env_values.get("NWN_PORT", "5121"))
+        return base + number + (server - 1) * SLOT_COUNT
+
+    def service(self, server: int) -> str:
+        """Return the Compose service name of one slot server."""
+
+        return "nwserver" if server == 1 else f"nwserver-{server}"
+
+    def server_home(self, number: int, server: int) -> Path:
+        """Return the NWN home of one slot server."""
+
+        if server == 1:
+            return self.home_dir(number)
+        return self.slot_dir(number) / f"server-{server}"
+
+    def server_logs(self, number: int, server: int) -> Path:
+        """Return the log folder of one slot server."""
+
+        suffix = "" if server == 1 else f"-{server}"
+        return self.slot_dir(number) / f"logs{suffix}"
 
     def claim(self, label: str | None) -> int:
         """Claim the first free slot, give it a fresh NWN home and return its number."""
@@ -155,29 +186,44 @@ class Slots:
         mounts: Sequence[dict[str, object]] = (),
         wait_pattern: str = DEFAULT_WAIT_PATTERN,
         timeout: float = DEFAULT_TIMEOUT_SECONDS,
+        servers: int = 1,
     ) -> int:
-        """(Re)start a slot's server and wait until its log matches ``wait_pattern``."""
+        """(Re)start a slot's servers and wait until their logs match ``wait_pattern``."""
 
         self._require_claimed(number)
         module = self.controller.config.module_name
         if not self.layout.module_archive_path(module).is_file():
             raise SlotError(f"Module {module}.mod not found. Run 'build' first.")
 
-        self._write_override(number, environment=environment, mounts=mounts)
+        for server in range(2, servers + 1):
+            home = self.server_home(number, server)
+            if not home.is_dir():
+                self._copy_home(home)
+                # Empty mount point for the first server's vault.
+                remove_tree(home / "servervault")
+                (home / "servervault").mkdir()
+            self.server_logs(number, server).mkdir(exist_ok=True)
+        self._write_override(
+            number, environment=environment, mounts=mounts, servers=servers
+        )
         self._check(self._compose(number, ["up", "-d", "db"]))
         self._wait_for_database(number)
+        services = [self.service(server) for server in range(1, servers + 1)]
         self._check(
             self._compose(
                 number,
-                ["up", "-d", "--no-deps", "--force-recreate", "nwserver"],
+                ["up", "-d", "--no-deps", "--force-recreate", "--remove-orphans"]
+                + services,
                 extra_env={"NWN_MODULE": module},
             )
         )
-        container = self.container(number, "nwserver")
-        self.output(f"{container} started on port {self.port(number)}/udp.")
-        self._wait_for_log(
-            container, re.compile(wait_pattern), time.monotonic() + timeout
-        )
+        pattern = re.compile(wait_pattern)
+        deadline = time.monotonic() + timeout
+        for server in range(1, servers + 1):
+            container = self.container(number, self.service(server))
+            port = self.port(number, server)
+            self.output(f"{container} started on port {port}/udp.")
+            self._wait_for_log(container, pattern, deadline)
         return 0
 
     def logs(self, number: int, docker_args: Sequence[str]) -> int:
@@ -200,14 +246,23 @@ class Slots:
             capture_output=False,
         ).returncode
 
-    def install(self, number: int, files: Sequence[str]) -> None:
-        """Copy files into a slot's development folder."""
+    def install(
+        self, number: int, files: Sequence[str], server: int | None = None
+    ) -> None:
+        """Copy files into the development folder of every or one slot server."""
 
         self._require_claimed(number)
-        development = self.home_dir(number) / "development"
-        for name in files:
-            shutil.copy2(name, development / Path(name).name)
-        self.output(f"Installed {len(files)} file(s) into {development}.")
+        if server is None:
+            homes = [self.home_dir(number), *self.slot_dir(number).glob("server-*")]
+        else:
+            homes = [self.server_home(number, server)]
+            if not homes[0].is_dir():
+                raise SlotError(f"Slot {number} has no server {server}.")
+        for home in homes:
+            development = home / "development"
+            for name in files:
+                shutil.copy2(name, development / Path(name).name)
+            self.output(f"Installed {len(files)} file(s) into {development}.")
 
     def status(self) -> None:
         """Print one line per slot with its port, server state and claim."""
@@ -288,45 +343,59 @@ class Slots:
         *,
         environment: Sequence[str] = (),
         mounts: Sequence[dict[str, object]] = (),
+        servers: int = 1,
     ) -> None:
         """Write the Compose override that turns the main services into slot N's."""
 
-        port = self.port(number)
-        environment = [
-            f"NWN_PORT={port}",
-            f"NWN_SERVERNAME=AREDev slot {number}",
-            "NWN_PUBLICSERVER=0",
-            # Slots do not start the profiler services, and the metrics plugin
-            # aborts the server when its InfluxDB host cannot be resolved.
-            "NWNX_METRICS_INFLUXDB_SKIP=y",
-            *environment,
-        ]
-        volumes = [
-            _bind(self.slot_dir(number) / "logs", "/nwn/run/logs.0"),
-            _bind(self.home_dir(number), "/nwn/home"),
-            _bind(self.layout.modules_dir, "/nwn/home/modules", read_only=True),
-            _bind(self.layout.override_dir, "/nwn/home/override", read_only=True),
-            *mounts,
-        ]
-        # JSON values are valid YAML flow values; "!override" replaces the base
-        # file's port and dependencies instead of merging with them.
-        self.override_file(number).write_text(
-            f"""\
+        text = f"""\
 # Generated by arebuilder for AREDev slot {number}; changes are overwritten.
 services:
   db:
     container_name: {_yaml(self.container(number, "db"))}
     restart: "no"
-  nwserver:
-    container_name: {_yaml(self.container(number, "nwserver"))}
+"""
+        for server in range(1, servers + 1):
+            port = self.port(number, server)
+            service = self.service(server)
+            name = f"AREDev slot {number}" + (f" server {server}" if server > 1 else "")
+            server_environment = [
+                f"NWN_PORT={port}",
+                f"NWN_SERVERNAME={name}",
+                "NWN_PUBLICSERVER=0",
+                # Slots do not start the profiler services, and the metrics plugin
+                # aborts the server when its InfluxDB host cannot be resolved.
+                "NWNX_METRICS_INFLUXDB_SKIP=y",
+                *environment,
+            ]
+            volumes = [
+                _bind(self.server_logs(number, server), "/nwn/run/logs.0"),
+                _bind(self.server_home(number, server), "/nwn/home"),
+                _bind(self.layout.modules_dir, "/nwn/home/modules", read_only=True),
+                _bind(self.layout.override_dir, "/nwn/home/override", read_only=True),
+                *mounts,
+            ]
+            text += f"  {service}:\n"
+            if server > 1:
+                # Further servers copy the main server definition and share the
+                # first server's vault, so characters can move between servers.
+                base = {
+                    "file": self.layout.compose_file.as_posix(),
+                    "service": "nwserver",
+                }
+                text += f"    extends: {_yaml(base)}\n    hostname: {_yaml(service)}\n"
+                vault = self.home_dir(number) / "servervault"
+                volumes.append(_bind(vault, "/nwn/home/servervault"))
+            # JSON values are valid YAML flow values; "!override" replaces the base
+            # file's port and dependencies instead of merging with them.
+            text += f"""\
+    container_name: {_yaml(self.container(number, service))}
     restart: "no"
     depends_on: !override ["db"]
     ports: !override [{_yaml(f"{port}:{port}/udp")}]
-    environment: {_yaml(environment)}
+    environment: {_yaml(server_environment)}
     volumes: {_yaml(volumes)}
-""",
-            encoding="utf-8",
-        )
+"""
+        self.override_file(number).write_text(text, encoding="utf-8")
 
     def _wait_for_database(self, number: int) -> None:
         """Wait until MariaDB accepts TCP connections, i.e. finished its first-run init."""
@@ -425,13 +494,14 @@ def run_slot_command(controller: "AREDevController", args: Sequence[str]) -> int
                 mounts=[_mount(item) for item in parsed.mounts],
                 wait_pattern=parsed.wait,
                 timeout=parsed.timeout,
+                servers=parsed.servers,
             )
         if command == "logs":
             return slots.logs(parsed.number, parsed.docker_args)
         if command == "sql":
             return slots.sql(parsed.number, " ".join(parsed.query))
         if command == "install":
-            slots.install(parsed.number, parsed.files)
+            slots.install(parsed.number, parsed.files, parsed.server)
         else:
             slots.release(parsed.number)
         return 0
@@ -454,6 +524,9 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("-v", action="append", default=[], dest="mounts")
     run.add_argument("--wait", default=DEFAULT_WAIT_PATTERN)
     run.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT_SECONDS)
+    run.add_argument(
+        "--servers", type=int, choices=range(1, MAX_SERVERS + 1), default=1
+    )
     logs = commands.add_parser("logs", prog="slot logs", add_help=False)
     logs.add_argument("number", type=int)
     logs.add_argument("docker_args", nargs=argparse.REMAINDER)
@@ -462,6 +535,7 @@ def _parser() -> argparse.ArgumentParser:
     sql.add_argument("query", nargs="+")
     install = commands.add_parser("install", prog="slot install", add_help=False)
     install.add_argument("number", type=int)
+    install.add_argument("--server", type=int)
     install.add_argument("files", nargs="+")
     release = commands.add_parser("release", prog="slot release", add_help=False)
     release.add_argument("number", type=int)
