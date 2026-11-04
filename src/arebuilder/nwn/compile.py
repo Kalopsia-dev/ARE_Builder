@@ -1090,8 +1090,9 @@ class StatefulScriptCompiler:
             return
         raise CompileError(
             "E: Unable to find nwscript.nss in the NWN install data. "
-            "Set NWN_INSTALL_PATH to the host Neverwinter Nights install root "
-            "and make sure it is mounted at /nwn/install in Dockerized AREDev."
+            "Pass --nwn-root (or set NWN_ROOT) to a Neverwinter Nights install "
+            "or server root. In Dockerized AREDev, set NWN_INSTALL_PATH to the "
+            "host install root, which is mounted at /nwn/install."
         )
 
 

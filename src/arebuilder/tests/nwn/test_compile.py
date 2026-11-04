@@ -288,6 +288,7 @@ def test_default_compiler_reports_missing_nwscript_before_compiling(
         )
 
     assert "Unable to find nwscript.nss" in str(exc_info.value)
+    assert "--nwn-root" in str(exc_info.value)
     assert "NWN_INSTALL_PATH" in str(exc_info.value)
 
 
