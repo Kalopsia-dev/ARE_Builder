@@ -405,18 +405,6 @@ class GameScriptSource:
             self._cache[script_name] = contents
             return contents
 
-    def fingerprint(self) -> bytes:
-        """Return a digest that changes whenever the scripts in this source change."""
-
-        if self.reader is not None:
-            # Game updates ship a new key file alongside changed archives.
-            return sha256(self.path.read_bytes()).digest()
-        digest = sha256()
-        for script_name in sorted(self.scripts):
-            digest.update(script_name.encode() + b"\0")
-            digest.update(sha256(self.get(script_name) or b"").digest())
-        return digest.digest()
-
     def close(self) -> None:
         """Release archive handles and cached script data owned by this source."""
 
@@ -749,7 +737,7 @@ class StatefulScriptCompiler:
         }
         retained = {name: value for name, value in hashes.items() if name in current}
         if retained != hashes:
-            write_hash_index(self.state_path, retained, self.compiler_fingerprint)
+            write_hash_index(self.state_path, retained, self.state_fingerprint)
         return stale_outputs
 
     def compile_script(self, script_name: str) -> CompileResult:
@@ -885,7 +873,7 @@ class StatefulScriptCompiler:
                 and self.state_path is not None
             ):
                 write_hash_index(
-                    self.state_path, new_hash_index, self.compiler_fingerprint
+                    self.state_path, new_hash_index, self.state_fingerprint
                 )
             return CompileResult(compiled_count=0)
 
@@ -983,7 +971,7 @@ class StatefulScriptCompiler:
         if new_hash_index is not None and self.use_state:
             if self.state_path is None:
                 raise CompileError("A state path is required to write script hashes.")
-            write_hash_index(self.state_path, new_hash_index, self.compiler_fingerprint)
+            write_hash_index(self.state_path, new_hash_index, self.state_fingerprint)
 
         compile_time = time.time() - self.start_time
         if not self.ci:
@@ -1041,21 +1029,33 @@ class StatefulScriptCompiler:
         assert self.state_path is not None
         state = _read_state(self.state_path)
         hashes = state.get("scripts", {})
-        if state.get("compiler") != self.compiler_fingerprint:
+        if state.get("compiler") != self.state_fingerprint:
             # Keep the names, which own their outputs, but match no source.
             return dict.fromkeys(hashes, 0)
         return hashes
 
     @cached_property
     def compiler_fingerprint(self) -> str:
-        """Identify the compiler and game scripts that compiled outputs depend on."""
+        """Identify the compiler and the nwscript.nss every output depends on."""
 
         digest = sha256(f"nwn {version('nwn')} {COMPILER_OPTIONS}".encode())
-        for source in self.game_scripts.sources:
-            digest.update(source.fingerprint())
         # The compiler loads nwscript.nss implicitly, from the project if overridden.
         digest.update(sha256(self.load_script("nwscript.nss") or b"").digest())
         return digest.hexdigest()
+
+    @cached_property
+    def state_fingerprint(self) -> str:
+        """Also identify the game scripts that are included, which state does not track."""
+
+        # Cache keys hash each script's includes instead, so referencing another
+        # game script does not invalidate every cache entry.
+        game_scripts = sorted(
+            f"{script.name}:{script.hash}"
+            for script in self._require_index()
+            if script.path is None and script.contents is not None
+        )
+        key = " ".join([self.compiler_fingerprint, *game_scripts])
+        return sha256(key.encode()).hexdigest()
 
     def _apply_hashes(self, modified: set[Script]) -> dict[str, int] | None:
         """Merge modified-script hashes into the persisted hash index."""

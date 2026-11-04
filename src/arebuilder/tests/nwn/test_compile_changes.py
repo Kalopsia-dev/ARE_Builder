@@ -792,6 +792,45 @@ def test_compiler_or_game_script_change_invalidates_saved_state(
     assert compile_scripts(**options).compiled_count == 2
 
 
+@pytest.mark.parametrize("changed", ["nwscript.nss", "base_include.nss"])
+@pytest.mark.parametrize("stateful", [False, True])
+def test_archived_script_change_invalidates_outputs_with_unchanged_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, changed: str, stateful: bool
+) -> None:
+    """The key file only indexes archived scripts; their bytes can change alone."""
+
+    archive = {
+        "nwscript.nss": b"void First();",
+        "base_include.nss": b"int Helper() { return 1; }",
+    }
+
+    class FakeKeyReader:
+        filenames = list(archive)
+
+        def __init__(self, path: str) -> None:
+            pass
+
+        def read_file(self, name: str) -> bytes:
+            return archive[name]
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(script_compile, "KeyReader", FakeKeyReader)
+    game = tmp_path / "game"
+    (game / "data").mkdir(parents=True)
+    (game / "data" / "nwn_base.key").write_bytes(b"unchanged key")
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    (scripts / "caller.nss").write_text('#include "base_include"\nvoid main() {}')
+
+    assert _compiled_names(tmp_path, stateful, nwn_root=game) == ["caller.nss"]
+    assert _compiled_names(tmp_path, stateful, nwn_root=game) == []
+
+    archive[changed] += b"\n// changed"
+    assert _compiled_names(tmp_path, stateful, nwn_root=game) == ["caller.nss"]
+
+
 @pytest.mark.parametrize(
     "previous_state",
     [{"tracked": 1}, {"compiler": "other", "scripts": {"tracked": 1}}],
@@ -909,6 +948,17 @@ def test_project_nwscript_override_invalidates_cached_outputs(
     nwscript = scripts / "nwscript.nss"
     nwscript.write_text("void First();\nvoid Second();")
     (scripts / "caller.nss").write_text("void main() { Second(); }")
+
+    assert _compiled_names(tmp_path, stateful) == ["caller.nss"]
+    assert _compiled_names(tmp_path, stateful) == []
+
+    nwscript.write_text("void Second();\nvoid First();")
+    assert _compiled_names(tmp_path, stateful) == ["caller.nss"]
+
+
+def _compiled_names(tmp_path: Path, stateful: bool, **options: object) -> list[str]:
+    """Compile tmp_path/scripts with saved state or a cache; return what compiled."""
+
     compiled: list[str] = []
 
     class RecordingCompiler:
@@ -916,21 +966,14 @@ def test_project_nwscript_override_invalidates_cached_outputs(
             compiled.append(script_name)
             return f"compiled:{script_name}".encode()
 
-    def compile_caller() -> list[str]:
-        compiled.clear()
-        compile_scripts(
-            script_dir=scripts,
-            output_dir=tmp_path / "output",
-            selector=None if stateful else "all",
-            state_path=tmp_path / "state.json",
-            use_state=stateful,
-            cache_dir=None if stateful else tmp_path / "cache",
-            compiler_factory=lambda _resolver: RecordingCompiler(),
-        )
-        return compiled
-
-    assert compile_caller() == ["caller.nss"]
-    assert compile_caller() == []
-
-    nwscript.write_text("void Second();\nvoid First();")
-    assert compile_caller() == ["caller.nss"]
+    compile_scripts(
+        script_dir=tmp_path / "scripts",
+        output_dir=tmp_path / "output",
+        selector=None if stateful else "all",
+        state_path=tmp_path / "state.json",
+        use_state=stateful,
+        cache_dir=None if stateful else tmp_path / "cache",
+        compiler_factory=lambda _resolver: RecordingCompiler(),
+        **options,
+    )
+    return compiled
