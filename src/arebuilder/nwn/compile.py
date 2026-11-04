@@ -153,7 +153,7 @@ class ScriptIndex:
     # comment text while searching for a quoted resource name.
     regex_tokens = re.compile(
         r"//[^\r\n]*|/\*[\s\S]*?(?:\*/|\Z)"
-        r'|#include(?>\s+|/\*[\s\S]*?\*/|//[^\r\n]*[\r\n])+"([^"\r\n]+)"'
+        r'|#include(?>\s+|/\*[\s\S]*?\*/|//[^\r\n]*[\r\n])*"([^"\r\n]+)"'
         r'|"[^"\\]*(?:\\.[^"\\]*)*"'
     )
     regex_main_fns = re.compile(

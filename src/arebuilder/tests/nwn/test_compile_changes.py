@@ -893,15 +893,17 @@ def test_interrupted_state_write_keeps_previous_state(
     assert list(tmp_path.iterdir()) == [state]
 
 
+# The native compiler also accepts an include without a space before the name.
+@pytest.mark.parametrize("directive", ['#include "inc_shared"', '#include"inc_shared"'])
 def test_cache_dir_compiles_each_source_and_include_combination_once(
-    tmp_path: Path,
+    tmp_path: Path, directive: str
 ) -> None:
     scripts = tmp_path / "scripts"
     scripts.mkdir()
     include = scripts / "inc_shared.nss"
     include.write_text("int helper() { return 1; }")
     (scripts / "dependent.nss").write_text(
-        '#include "inc_shared"\nvoid main() { int x = helper(); }'
+        f"{directive}\nvoid main() {{ int x = helper(); }}"
     )
     (scripts / "unrelated.nss").write_text("void main() {}")
     compiled: list[str] = []
