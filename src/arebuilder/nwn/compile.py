@@ -869,6 +869,9 @@ class StatefulScriptCompiler:
         self._validate_game_script_sources()
         _ensure_compiler_thread_stack_size()
 
+        if self.ci:
+            print(f"{len(script_set)} script(s) will be compiled.", flush=True)
+
         init_lock = threading.Lock()
         thread_local = threading.local()
         progress = None if self.ci else ProgressBar(total=len(script_set))

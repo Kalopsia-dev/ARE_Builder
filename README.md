@@ -180,11 +180,13 @@ removed, and unrelated missing
 outputs do not trigger compilation. Empty changes succeed without compiling
 anything. A positional selector cannot be combined with `--changes`.
 
-`--ci` replaces progress bars and verbose selection details with flushed lines
-as each compilation starts. It also works without `--changes`. Parallel workers
-may start scripts in different orders. Successful output looks like:
+`--ci` prints the number of selected scripts before compilation starts, then
+prints a flushed line for each script as it starts. It also works without
+`--changes`. Parallel workers may start scripts in different orders. Runs with
+nothing to compile skip the count. Successful output looks like:
 
 ```text
+2 script(s) will be compiled.
 Compiling example.nss
 Compiling dependent_script.nss
 Compilation complete.

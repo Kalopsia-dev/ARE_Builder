@@ -138,7 +138,7 @@ def test_deleted_override_restores_game_entrypoint_alias(
     assert compile_scripts(**options).compiled_count == 1
     assert (output / "alias.ncs").read_bytes().startswith(b"NCS V1.0")
     assert capsys.readouterr().out == (
-        "Compiling alias.nss\nCompilation complete.\n\n"
+        "1 script(s) will be compiled.\nCompiling alias.nss\nCompilation complete.\n\n"
         "Stale build artifacts:\n- base_entry.ncs\n"
     )
 
@@ -217,7 +217,7 @@ def test_changes_compile_transitive_dependents_without_touching_state(
     assert {path.name for path in output.iterdir()} == {"first.ncs", "unrelated.ncs"}
     assert state.read_text() == "intentionally invalid state: must not be read"
     log = capsys.readouterr().out
-    assert "Compiling first.nss\n" in log
+    assert log.startswith("1 script(s) will be compiled.\nCompiling first.nss\n")
     assert "Compilation complete.\n" in log
     assert "Stale build artifacts:\n- leaf.ncs\n" in log
     assert "change(s) found" not in log
@@ -735,7 +735,7 @@ def test_removed_primary_reports_stale_output_with_include_directory_fallback(
     if fallback_has_entrypoint:
         assert (output / "alias.ncs").read_bytes() != previous["alias.ncs"]
         assert capsys.readouterr().out == (
-            "Compiling alias.nss\nCompilation complete.\n\n"
+            "1 script(s) will be compiled.\nCompiling alias.nss\nCompilation complete.\n\n"
             "Stale build artifacts:\n- example.ncs\n"
         )
     else:

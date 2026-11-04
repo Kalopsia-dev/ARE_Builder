@@ -264,7 +264,8 @@ def test_ci_changes_compile_without_project_layout_or_state(
     assert state.read_text() == "must remain untouched"
     log = capsys.readouterr()
     assert log.out == (
-        "Compiling affected.nss\nCompilation complete.\n\n"
+        "1 script(s) will be compiled.\nCompiling affected.nss\n"
+        "Compilation complete.\n\n"
         "Stale build artifacts:\n- inc_shared.ncs\n- removed.ncs\n"
     )
     assert log.err == ""
