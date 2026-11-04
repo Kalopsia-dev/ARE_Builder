@@ -241,6 +241,34 @@ def test_default_compiler_uses_game_optimization_level(
     assert created["optimizations"] == {script_compile.Optimization.DEAD_FUNCTIONS}
 
 
+def test_compile_reports_every_failed_script(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Every script is compiled, so the summary counts every failure."""
+
+    script_dir = tmp_path / "scripts"
+    script_dir.mkdir()
+    nwn_root = tmp_path / "nwn"
+    (nwn_root / "ovr").mkdir(parents=True)
+    _write_script(nwn_root / "ovr" / "nwscript.nss", "void PrintString(string text);")
+    for name in ("broken_one", "broken_two"):
+        _write_script(script_dir / f"{name}.nss", "void main() { int x = ; }")
+    _write_script(script_dir / "valid.nss", "void main() {}")
+
+    with pytest.raises(CompileError, match=r"2 error\(s\)"):
+        compile_scripts(
+            script_dir=script_dir,
+            output_dir=tmp_path / "compiled",
+            selector="all",
+            nwn_root=nwn_root,
+            use_state=False,
+            ci=True,
+        )
+
+    assert "Compiling valid.nss" in capsys.readouterr().out
+    assert not (tmp_path / "compiled").exists()
+
+
 def test_default_compiler_reports_missing_nwscript_before_compiling(
     tmp_path: Path,
 ) -> None:
