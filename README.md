@@ -138,6 +138,39 @@ Set the game installation with `--nwn-root` or `NWN_ROOT`, and the compiler work
 count with `--workers` or `COMPILE_WORKERS` (by default, CPU count).
 If you cannot run from the project directory, use
 `--root /path/to/AREDev` or set `AREDEV_ROOT=/path/to/AREDev`.
+The state file records the compiler and game scripts it was built with; if
+either changes, the next run compiles every script.
+
+Standalone compilation does not need Docker. For example, with
+[uv](https://docs.astral.sh/uv/):
+
+```bash
+uv venv --python 3.13 .venv
+uv pip install --python .venv/bin/python \
+  "arebuilder @ https://github.com/Kalopsia-dev/ARE_Builder/archive/<ref>.tar.gz"
+```
+
+### Shared compile cache
+
+`--cache-dir` (CLI-only) stores each compiled script under a key built from
+its source, its transitive includes, and the compiler and game scripts, and
+reuses it in later runs, including runs for other branches or into other
+output directories. With a cache, `compile all` into an empty output directory
+only compiles scripts whose inputs have not been compiled before:
+
+```bash
+arebuilder \
+  --script-dir /path/to/scripts \
+  --output-dir /path/to/compiled \
+  --nwn-root /path/to/nwn \
+  --cache-dir /path/to/cache \
+  --ci \
+  compile all
+```
+
+Cache entries are written atomically, so concurrent builds can share one cache.
+arebuilder never prunes it; remove old entries yourself, for example with
+`find /path/to/cache -name '*.ncs' -mtime +30 -delete`.
 
 ### TeamCity and CI logging
 
