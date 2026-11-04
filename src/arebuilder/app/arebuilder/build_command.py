@@ -22,6 +22,7 @@ def execute_build_command(
     settings: BuilderSettings | None = None,
     changes_path: Path | None = None,
     ci: bool = False,
+    cache_dir: Path | None = None,
 ) -> int:
     """Validate command defaults and route one request to the build engine."""
 
@@ -35,6 +36,7 @@ def execute_build_command(
         runtime.config,
         runtime.paths,
         ci=ci,
+        cache_dir=cache_dir,
     )
     resolved_target = target_name or "all"
     resolved_palettes = (

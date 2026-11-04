@@ -38,6 +38,7 @@ class BuildEngine:
         *,
         script_compiler: ScriptCompilerRunner | None = None,
         ci: bool = False,
+        cache_dir: Path | None = None,
     ) -> None:
         """Initialize the instance with its required collaborators and state."""
 
@@ -45,6 +46,7 @@ class BuildEngine:
         self.runtime_paths = runtime_paths or RuntimePaths()
         self.script_compiler = script_compiler or compile_scripts
         self.ci = ci
+        self.cache_dir = cache_dir
         self._talk_table: TalkTable | None = None
         self.default_palettes = list(DEFAULT_PALETTES)
         self._custom_content_cache: set[tuple[str, str, str, str | None, str]] = set()
@@ -235,6 +237,7 @@ class BuildEngine:
             clear_output_on_all=True,
             changes_path=changes_path,
             ci=self.ci,
+            cache_dir=self.cache_dir,
         )
 
     def _compile_target_scripts(

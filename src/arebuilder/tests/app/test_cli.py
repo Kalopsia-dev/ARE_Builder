@@ -352,7 +352,31 @@ def test_target_compile_cleanup_preserves_precompiled_fallback(
 
     assert (fixture.build_dir / "fixture_precompiled.ncs").read_bytes() == b"fallback"
     state = fixture.root / "temp" / "script_index_synthetic.json"
-    assert "fixture_precompiled" not in json.loads(state.read_text())
+    assert "fixture_precompiled" not in json.loads(state.read_text())["scripts"]
+
+
+def test_cache_dir_reuses_native_outputs_in_a_fresh_output_dir(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    (scripts / "example.nss").write_text("void main() { int x = 1; }")
+    nwn = tmp_path / "game"
+    (nwn / "ovr").mkdir(parents=True)
+    (nwn / "ovr" / "nwscript.nss").write_text("void PrintString(string text);")
+
+    def compile_all(output: Path) -> str:
+        argv = ["--script-dir", str(scripts), "--output-dir", str(output)]
+        argv += ["--nwn-root", str(nwn), "--state-file", str(tmp_path / "state")]
+        argv += ["--cache-dir", str(tmp_path / "cache"), "--ci", "compile", "all"]
+        assert main(argv) == 0
+        return capsys.readouterr().out
+
+    assert "Compiling example.nss" in compile_all(tmp_path / "first")
+    assert compile_all(tmp_path / "second") == "Compilation complete.\n"
+    assert (tmp_path / "second" / "example.ncs").read_bytes() == (
+        tmp_path / "first" / "example.ncs"
+    ).read_bytes()
 
 
 @pytest.mark.parametrize(

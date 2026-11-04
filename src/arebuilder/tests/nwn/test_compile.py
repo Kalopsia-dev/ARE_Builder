@@ -226,6 +226,51 @@ def test_entrypoint_layouts_reach_native_compiler(
         assert (output_dir / "executable.ncs").read_bytes().startswith(b"NCS V1.0")
 
 
+def test_default_compiler_uses_game_optimization_level(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The game and toolset only remove dead functions (nwn_script_comp -O1)."""
+
+    created: dict[str, object] = {}
+    monkeypatch.setattr(
+        script_compile, "NwScriptCompiler", lambda **kwargs: created.update(kwargs)
+    )
+
+    script_compile._create_nwn_compiler(lambda _name: None)
+
+    assert created["optimizations"] == {script_compile.Optimization.DEAD_FUNCTIONS}
+
+
+def test_compile_reports_every_failed_script(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Every script is compiled, so the summary counts every failure."""
+
+    script_dir = tmp_path / "scripts"
+    script_dir.mkdir()
+    nwn_root = tmp_path / "nwn"
+    (nwn_root / "ovr").mkdir(parents=True)
+    _write_script(nwn_root / "ovr" / "nwscript.nss", "void PrintString(string text);")
+    for name in ("broken_one", "broken_two"):
+        _write_script(script_dir / f"{name}.nss", "void main() { int x = ; }")
+    _write_script(script_dir / "valid.nss", "void main() {}")
+
+    with pytest.raises(CompileError, match=r"2 error\(s\)") as exc_info:
+        compile_scripts(
+            script_dir=script_dir,
+            output_dir=tmp_path / "compiled",
+            selector="all",
+            nwn_root=nwn_root,
+            use_state=False,
+            ci=True,
+        )
+
+    # Library callers can still reach the native compiler diagnostic.
+    assert isinstance(exc_info.value.__cause__, script_compile.CompilationError)
+    assert "Compiling valid.nss" in capsys.readouterr().out
+    assert not (tmp_path / "compiled").exists()
+
+
 def test_default_compiler_reports_missing_nwscript_before_compiling(
     tmp_path: Path,
 ) -> None:
@@ -245,6 +290,7 @@ def test_default_compiler_reports_missing_nwscript_before_compiling(
         )
 
     assert "Unable to find nwscript.nss" in str(exc_info.value)
+    assert "--nwn-root" in str(exc_info.value)
     assert "NWN_INSTALL_PATH" in str(exc_info.value)
 
 
@@ -416,7 +462,7 @@ def test_modified_compile_initialises_state_then_noops_when_unchanged(
         "main_one.ncs",
         "main_two.ncs",
     }
-    assert set(json.loads(state_path.read_text(encoding="utf-8"))) == {
+    assert set(json.loads(state_path.read_text(encoding="utf-8"))["scripts"]) == {
         "inc_shared",
         "main_one",
         "main_two",
@@ -704,7 +750,7 @@ def test_stateful_target_compile_tracks_shared_include_changes(
     assert second_result.compiled_count == 0
     assert changed_include_result.compiled_count == 1
     assert {path.name for path in output_dir.glob("*.ncs")} == {"target_main.ncs"}
-    assert json.loads(state_path.read_text(encoding="utf-8")).keys() == {
+    assert json.loads(state_path.read_text(encoding="utf-8"))["scripts"].keys() == {
         "inc_shared",
         "target_main",
     }

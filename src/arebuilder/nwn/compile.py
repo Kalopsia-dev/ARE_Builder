@@ -8,14 +8,15 @@ from collections import deque
 from collections.abc import Callable, Iterable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from functools import lru_cache
+from functools import cached_property, lru_cache
 from graphlib import CycleError, TopologicalSorter
 from hashlib import sha256
+from importlib.metadata import version
 from pathlib import Path, PurePosixPath
 from typing import Protocol
 
 from nwn.key import Reader as KeyReader
-from nwn.nwscript.comp import CompilationError
+from nwn.nwscript.comp import CompilationError, Optimization
 from nwn.nwscript.comp import Compiler as NwScriptCompiler
 
 
@@ -31,6 +32,13 @@ class CompilerBackend(Protocol):
 
 
 CompilerFactory = Callable[[Callable[[str], bytes | None]], CompilerBackend]
+# Match the game, toolset, and nwn_script_comp default (-O1). The library
+# default also removes dead branches, which produces different bytecode.
+COMPILER_OPTIONS = {
+    "debug_info": False,
+    "max_include_depth": 64,
+    "optimizations": {Optimization.DEAD_FUNCTIONS},
+}
 MIN_COMPILER_THREAD_STACK_SIZE = 8 * 1024 * 1024
 _compiler_thread_stack_lock = threading.Lock()
 _compiler_thread_stack_configured = False
@@ -145,7 +153,7 @@ class ScriptIndex:
     # comment text while searching for a quoted resource name.
     regex_tokens = re.compile(
         r"//[^\r\n]*|/\*[\s\S]*?(?:\*/|\Z)"
-        r'|#include(?>\s+|/\*[\s\S]*?\*/|//[^\r\n]*[\r\n])+"([^"\r\n]+)"'
+        r'|#include(?>\s+|/\*[\s\S]*?\*/|//[^\r\n]*[\r\n])*"([^"\r\n]+)"'
         r'|"[^"\\]*(?:\\.[^"\\]*)*"'
     )
     regex_main_fns = re.compile(
@@ -231,10 +239,9 @@ class ScriptIndex:
             script for script in self.primary_scripts() if self.is_compilable(script)
         }
 
-    def get_modified(self, state_path: Path) -> set[Script]:
+    def get_modified(self, hash_index: dict[str, int]) -> set[Script]:
         """Return indexed local scripts whose content hash differs from saved state."""
 
-        hash_index = read_hash_index(state_path)
         return {
             script
             for script in self
@@ -510,10 +517,12 @@ class StatefulScriptCompiler:
         changes_path: Path | None = None,
         ci: bool = False,
         preserved_outputs: Iterable[str] = (),
+        cache_dir: Path | None = None,
     ) -> None:
         """Initialize the instance with its required collaborators and state."""
 
         self.script_dir = script_dir.absolute()
+        self.cache_dir = cache_dir
         self.output_dir = output_dir
         self.selector = selector
         self.state_path = state_path
@@ -720,7 +729,7 @@ class StatefulScriptCompiler:
                     if path.is_file() or path.is_symlink():
                         path.unlink()
                         stale_outputs.add(filename)
-        hashes = read_hash_index(self.state_path)
+        hashes = self._saved_hashes()
         current = {
             script.name
             for script in script_index
@@ -728,7 +737,7 @@ class StatefulScriptCompiler:
         }
         retained = {name: value for name, value in hashes.items() if name in current}
         if retained != hashes:
-            write_hash_index(self.state_path, retained)
+            write_hash_index(self.state_path, retained, self.state_fingerprint)
         return stale_outputs
 
     def compile_script(self, script_name: str) -> CompileResult:
@@ -787,7 +796,7 @@ class StatefulScriptCompiler:
         if self.state_path is None:
             raise CompileError("A state path is required for modified compilation.")
 
-        modified = script_index.get_modified(state_path=self.state_path)
+        modified = script_index.get_modified(self._saved_hashes())
         modified.update(
             script
             for name in self.removed_names
@@ -863,7 +872,9 @@ class StatefulScriptCompiler:
                 and self.use_state
                 and self.state_path is not None
             ):
-                write_hash_index(self.state_path, new_hash_index)
+                write_hash_index(
+                    self.state_path, new_hash_index, self.state_fingerprint
+                )
             return CompileResult(compiled_count=0)
 
         self._validate_game_script_sources()
@@ -872,6 +883,13 @@ class StatefulScriptCompiler:
         init_lock = threading.Lock()
         thread_local = threading.local()
         progress = None if self.ci else ProgressBar(total=len(script_set))
+        cache_paths: dict[Script, Path] = {}
+        if self.cache_dir is not None:
+            self.cache_dir.mkdir(parents=True, exist_ok=True)
+            cache_paths = {
+                script: self.cache_dir / f"{self._cache_key(script)}.ncs"
+                for script in script_set
+            }
 
         def init_compiler() -> None:
             """Create the thread-local compiler instance for worker threads."""
@@ -881,15 +899,23 @@ class StatefulScriptCompiler:
             with init_lock:
                 thread_local.compiler = self.compiler_factory(self.load_script)
 
-        def compile_in_thread(script: Script) -> tuple[str, bytes]:
+        errors: list[CompilationError] = []
+
+        def compile_in_thread(script: Script) -> tuple[str, bytes | None]:
             """Compile one script inside the worker pool and normalize backend return shapes."""
 
             try:
-                if self.ci:
-                    with init_lock:
-                        print(f"Compiling {script.name}.nss", flush=True)
-                compiled = thread_local.compiler.compile(f"{script.name}.nss")
-                ncs_bytes = compiled[0] if isinstance(compiled, tuple) else compiled
+                cache_path = cache_paths.get(script)
+                if cache_path is not None and cache_path.is_file():
+                    ncs_bytes = cache_path.read_bytes()
+                else:
+                    if self.ci:
+                        with init_lock:
+                            print(f"Compiling {script.name}.nss", flush=True)
+                    compiled = thread_local.compiler.compile(f"{script.name}.nss")
+                    ncs_bytes = compiled[0] if isinstance(compiled, tuple) else compiled
+                    if cache_path is not None and ncs_bytes is not None:
+                        _write_atomic(cache_path, ncs_bytes)
                 if progress is not None:
                     progress.update()
                 return f"{script.name}.ncs", ncs_bytes
@@ -897,7 +923,9 @@ class StatefulScriptCompiler:
                 if progress is not None:
                     progress.close()
                 print(f"\n{error.message.splitlines()[0].split(' [')[0]}")
-                raise
+                # Keep compiling so one run reports every broken script.
+                errors.append(error)
+                return f"{script.name}.ncs", None
 
         try:
             with ThreadPoolExecutor(
@@ -916,10 +944,6 @@ class StatefulScriptCompiler:
                 }
             if progress is not None:
                 progress.close()
-        except CompilationError as exc:
-            raise CompileError(
-                "\nStopping processing on first error.\n\n1 error; see above for context."
-            ) from exc
         except KeyboardInterrupt as exc:
             if progress is not None:
                 progress.close(leave=False)
@@ -930,6 +954,10 @@ class StatefulScriptCompiler:
             print("\nAn unexpected error occurred during compilation:", end="\n\n")
             traceback.print_exc()
             raise CompileError("\nStopping processing.") from exc
+        if errors:
+            raise CompileError(
+                f"\n{len(errors)} error(s); see above for context."
+            ) from errors[0]
 
         if clear_output:
             self.clear_output_folders()
@@ -945,12 +973,21 @@ class StatefulScriptCompiler:
         if new_hash_index is not None and self.use_state:
             if self.state_path is None:
                 raise CompileError("A state path is required to write script hashes.")
-            write_hash_index(self.state_path, new_hash_index)
+            write_hash_index(self.state_path, new_hash_index, self.state_fingerprint)
 
         compile_time = time.time() - self.start_time
         if not self.ci:
             print(f"Success!\n\nTotal Execution time = {compile_time:.4f} seconds\n")
         return CompileResult(compiled_count=len(compiled))
+
+    def _cache_key(self, script: Script) -> str:
+        """Identify a script's output by its source, includes, and compiler."""
+
+        key = " ".join(
+            [self.compiler_fingerprint, script.name, str(script.hash)]
+            + sorted(f"{include.name}:{include.hash}" for include in script.includes)
+        )
+        return sha256(key.encode()).hexdigest()
 
     def load_script(self, script_name: str) -> bytes | None:
         """Load a custom script first, then fall back to base-game sources."""
@@ -984,9 +1021,43 @@ class StatefulScriptCompiler:
     def _has_state(self) -> bool:
         """Return whether a saved hash index is available for stateful compilation."""
 
-        if self.state_path is None:
+        if self.state_path is None or not self.use_state:
             return False
-        return self.use_state and self.state_path.exists()
+        return "scripts" in _read_state(self.state_path)
+
+    def _saved_hashes(self) -> dict[str, int]:
+        """Return saved hashes, invalidated if the compiler or game scripts changed."""
+
+        assert self.state_path is not None
+        state = _read_state(self.state_path)
+        hashes = state.get("scripts", {})
+        if state.get("compiler") != self.state_fingerprint:
+            # Keep the names, which own their outputs, but match no source.
+            return dict.fromkeys(hashes, 0)
+        return hashes
+
+    @cached_property
+    def compiler_fingerprint(self) -> str:
+        """Identify the compiler and the nwscript.nss every output depends on."""
+
+        digest = sha256(f"nwn {version('nwn')} {COMPILER_OPTIONS}".encode())
+        # The compiler loads nwscript.nss implicitly, from the project if overridden.
+        digest.update(sha256(self.load_script("nwscript.nss") or b"").digest())
+        return digest.hexdigest()
+
+    @cached_property
+    def state_fingerprint(self) -> str:
+        """Also identify the game scripts that are included, which state does not track."""
+
+        # Cache keys hash each script's includes instead, so referencing another
+        # game script does not invalidate every cache entry.
+        game_scripts = sorted(
+            f"{script.name}:{script.hash}"
+            for script in self._require_index()
+            if script.path is None and script.contents is not None
+        )
+        key = " ".join([self.compiler_fingerprint, *game_scripts])
+        return sha256(key.encode()).hexdigest()
 
     def _apply_hashes(self, modified: set[Script]) -> dict[str, int] | None:
         """Merge modified-script hashes into the persisted hash index."""
@@ -995,7 +1066,7 @@ class StatefulScriptCompiler:
             return None
         if self.state_path is None:
             raise CompileError("A state path is required to update script hashes.")
-        hashes = read_hash_index(self.state_path)
+        hashes = self._saved_hashes()
         hashes.update(
             {
                 script.name: script.hash
@@ -1032,8 +1103,9 @@ class StatefulScriptCompiler:
             return
         raise CompileError(
             "E: Unable to find nwscript.nss in the NWN install data. "
-            "Set NWN_INSTALL_PATH to the host Neverwinter Nights install root "
-            "and make sure it is mounted at /nwn/install in Dockerized AREDev."
+            "Pass --nwn-root (or set NWN_ROOT) to a Neverwinter Nights install "
+            "or server root. In Dockerized AREDev, set NWN_INSTALL_PATH to the "
+            "host install root, which is mounted at /nwn/install."
         )
 
 
@@ -1053,6 +1125,7 @@ def compile_scripts(
     changes_path: Path | None = None,
     ci: bool = False,
     preserved_outputs: Iterable[str] = (),
+    cache_dir: Path | None = None,
 ) -> CompileResult:
     """Compile NWScript sources using saved state or an explicit changes file."""
 
@@ -1071,6 +1144,7 @@ def compile_scripts(
         changes_path=changes_path,
         ci=ci,
         preserved_outputs=preserved_outputs,
+        cache_dir=cache_dir,
     )
     return compiler.run()
 
@@ -1154,19 +1228,44 @@ def _path_text_looks_windows(path: str) -> bool:
 def read_hash_index(path: Path) -> dict[str, int]:
     """Load script hashes from a state file."""
 
-    if path.exists():
-        return json.loads(path.read_text(encoding="utf-8"))
-    return {}
+    return _read_state(path).get("scripts", {})
 
 
-def write_hash_index(path: Path, hash_index: dict[str, int]) -> None:
-    """Write script hashes to a state file."""
+def _read_state(path: Path) -> dict:
+    """Load a state file, treating missing or unreadable files as empty."""
+
+    try:
+        state = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, ValueError):
+        return {}
+    if not isinstance(state, dict):
+        return {}
+    if not isinstance(state.get("scripts"), dict):
+        # Older state files stored the hashes at the top level.
+        return {"scripts": state}
+    return state
+
+
+def write_hash_index(path: Path, hash_index: dict[str, int], compiler: str) -> None:
+    """Write script hashes and the compiler fingerprint to a state file."""
 
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(hash_index), encoding="utf-8")
+        state = {"compiler": compiler, "scripts": hash_index}
+        _write_atomic(path, json.dumps(state).encode())
     except OSError as exc:
         raise CompileError(f"E: Unable to store script hashes ({exc})") from exc
+
+
+def _write_atomic(path: Path, data: bytes) -> None:
+    """Replace a file in one step so interrupted writes never leave partial data."""
+
+    temp_path = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    try:
+        temp_path.write_bytes(data)
+        os.replace(temp_path, path)
+    finally:
+        temp_path.unlink(missing_ok=True)
 
 
 def delete_hash_index(path: Path) -> None:
@@ -1179,11 +1278,7 @@ def delete_hash_index(path: Path) -> None:
 def _create_nwn_compiler(resolver: Callable[[str], bytes | None]) -> CompilerBackend:
     """Create the pinned third-party NWScript compiler backend with project resolver hooks."""
 
-    return NwScriptCompiler(
-        resolver=resolver,
-        debug_info=False,
-        max_include_depth=64,
-    )
+    return NwScriptCompiler(resolver=resolver, **COMPILER_OPTIONS)
 
 
 def _ensure_compiler_thread_stack_size() -> None:

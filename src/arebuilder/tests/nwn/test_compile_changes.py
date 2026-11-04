@@ -99,7 +99,7 @@ def test_game_include_dependencies_follow_current_overrides(
         )
         assert (output / "second.ncs").read_bytes() != previous["second.ncs"]
         assert (output / "unrelated.ncs").read_bytes() == previous["unrelated.ncs"]
-        assert set(json.loads(state.read_text())) == {
+        assert set(json.loads(state.read_text())["scripts"]) == {
             "first",
             "second",
             "unrelated",
@@ -418,28 +418,29 @@ def test_removed_sources_prune_state_and_live_output_without_sweeping_untracked_
     assert not (output / "removed.ncs").exists()
     assert not (live / "removed.ncs").exists()
     assert (output / "untracked.ncs").read_bytes() == b"keep"
-    assert set(json.loads(state.read_text())) == {"kept"}
+    assert set(json.loads(state.read_text())["scripts"]) == {"kept"}
 
 
 def test_stateful_cleanup_preserves_precompiled_fallback(tmp_path: Path) -> None:
     scripts = tmp_path / "scripts"
     scripts.mkdir()
+    (scripts / "removed.nss").write_text("void main() {}")
     output = tmp_path / "output"
-    output.mkdir()
-    (output / "removed.ncs").write_bytes(b"precompiled fallback")
     state = tmp_path / "script_index.json"
-    state.write_text('{"removed": 1}')
+    options = {
+        "script_dir": scripts,
+        "output_dir": output,
+        "state_path": state,
+        "compiler_factory": fake_compiler_factory,
+    }
+    compile_scripts(**options)
+    (scripts / "removed.nss").unlink()
+    (output / "removed.ncs").write_bytes(b"precompiled fallback")
 
-    compile_scripts(
-        script_dir=scripts,
-        output_dir=output,
-        state_path=state,
-        preserved_outputs={"removed.ncs"},
-        compiler_factory=fake_compiler_factory,
-    )
+    compile_scripts(**options, preserved_outputs={"removed.ncs"})
 
     assert (output / "removed.ncs").read_bytes() == b"precompiled fallback"
-    assert json.loads(state.read_text()) == {}
+    assert json.loads(state.read_text())["scripts"] == {}
 
 
 @pytest.mark.parametrize("stateless", [False, True])
@@ -448,12 +449,19 @@ def test_failed_compile_does_not_clean_or_report_stale_artifacts(
 ) -> None:
     scripts = tmp_path / "scripts"
     scripts.mkdir()
-    (scripts / "broken.nss").write_text("void main() {}")
+    (scripts / "removed.nss").write_text("void main() {}")
     output = tmp_path / "output"
-    output.mkdir()
-    (output / "removed.ncs").write_bytes(b"keep on failure")
     state = tmp_path / "script_index.json"
-    state.write_text('{"removed": 1}')
+    compile_scripts(
+        script_dir=scripts,
+        output_dir=output,
+        state_path=state,
+        compiler_factory=fake_compiler_factory,
+    )
+    original_state = state.read_bytes()
+    (scripts / "removed.nss").unlink()
+    (scripts / "broken.nss").write_text("void main() {}")
+    (output / "removed.ncs").write_bytes(b"keep on failure")
     changes = tmp_path / "changes.txt"
     changes.write_text("scripts/broken.nss:CHANGED:1\nscripts/removed.nss:REMOVED:1\n")
 
@@ -472,7 +480,7 @@ def test_failed_compile_does_not_clean_or_report_stale_artifacts(
         )
 
     assert (output / "removed.ncs").read_bytes() == b"keep on failure"
-    assert state.read_text() == '{"removed": 1}'
+    assert state.read_bytes() == original_state
     log = capsys.readouterr().out
     assert "Compilation complete." not in log
     assert "Stale build artifacts:" not in log
@@ -523,27 +531,35 @@ def test_removing_entire_script_directory_allows_deletion_only_run(
     tmp_path: Path, stateless: bool, capsys: pytest.CaptureFixture[str]
 ) -> None:
     scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    (scripts / "removed.nss").write_text("void main() {}")
     output = tmp_path / "output"
-    output.mkdir()
-    (output / "removed.ncs").write_bytes(b"old output")
     state = tmp_path / "state.json"
-    state.write_text('{"removed": 1}')
+    options = {
+        "script_dir": scripts,
+        "output_dir": output,
+        "state_path": state,
+        "compiler_factory": fake_compiler_factory,
+        "ci": True,
+    }
+    compile_scripts(**options)
+    (scripts / "removed.nss").unlink()
+    scripts.rmdir()
     changes = tmp_path / "changes.txt"
     changes.write_text("scripts/removed.nss:REMOVED:abc\n")
+    capsys.readouterr()
 
     assert (
         compile_scripts(
-            script_dir=scripts,
-            output_dir=output,
-            state_path=state,
-            changes_path=changes if stateless else None,
-            ci=True,
+            **options, changes_path=changes if stateless else None
         ).compiled_count
         == 0
     )
 
     assert (output / "removed.ncs").exists() == stateless
-    assert json.loads(state.read_text()) == ({"removed": 1} if stateless else {})
+    assert set(json.loads(state.read_text())["scripts"]) == (
+        {"removed"} if stateless else set()
+    )
     assert capsys.readouterr().out == (
         "Compilation complete.\n\nStale build artifacts:\n- removed.ncs\n"
     )
@@ -632,7 +648,7 @@ def test_full_compile_can_rebuild_invalid_state(tmp_path: Path) -> None:
         ).compiled_count
         == 1
     )
-    assert set(json.loads(state.read_text())) == {"example"}
+    assert set(json.loads(state.read_text())["scripts"]) == {"example"}
 
 
 def test_named_compile_preserves_removed_include_invalidation_for_next_run(
@@ -659,7 +675,7 @@ def test_named_compile_preserves_removed_include_invalidation_for_next_run(
     (scripts / "library.nss").unlink()
 
     assert compile_scripts(**options, selector="unrelated").compiled_count == 1
-    assert "library" in json.loads(state.read_text())
+    assert "library" in json.loads(state.read_text())["scripts"]
     with pytest.raises(CompileError):
         compile_scripts(**options)
 
@@ -688,7 +704,7 @@ def test_removed_primary_output_is_cleaned_even_when_shared_source_exists(
 
     assert compile_scripts(**options).compiled_count == 0
     assert not (output / "example.ncs").exists()
-    assert "example" not in json.loads(state.read_text())
+    assert "example" not in json.loads(state.read_text())["scripts"]
 
 
 @pytest.mark.parametrize("fallback_has_entrypoint", [False, True])
@@ -744,3 +760,222 @@ def test_removed_primary_reports_stale_output_with_include_directory_fallback(
             "Compilation complete.\n\nStale build artifacts:\n"
             "- alias.ncs\n- example.ncs\n"
         )
+
+
+def test_compiler_or_game_script_change_invalidates_saved_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Saved hashes only describe outputs from the same compiler and game scripts."""
+
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    (scripts / "first.nss").write_text("void main() {}")
+    (scripts / "second.nss").write_text("void main() {}")
+    game = tmp_path / "game"
+    (game / "ovr").mkdir(parents=True)
+    (game / "ovr" / "nwscript.nss").write_text("void PrintString(string text);")
+    options = {
+        "script_dir": scripts,
+        "output_dir": tmp_path / "output",
+        "state_path": tmp_path / "state.json",
+        "nwn_root": game,
+        "compiler_factory": fake_compiler_factory,
+    }
+    assert compile_scripts(**options).compiled_count == 2
+    assert compile_scripts(**options).compiled_count == 0
+
+    (game / "ovr" / "nwscript.nss").write_text("void PrintInteger(int value);")
+    assert compile_scripts(**options).compiled_count == 2
+    assert compile_scripts(**options).compiled_count == 0
+
+    monkeypatch.setattr(script_compile, "version", lambda _name: "0.0.0")
+    assert compile_scripts(**options).compiled_count == 2
+
+
+@pytest.mark.parametrize("changed", ["nwscript.nss", "base_include.nss"])
+@pytest.mark.parametrize("stateful", [False, True])
+def test_archived_script_change_invalidates_outputs_with_unchanged_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, changed: str, stateful: bool
+) -> None:
+    """The key file only indexes archived scripts; their bytes can change alone."""
+
+    archive = {
+        "nwscript.nss": b"void First();",
+        "base_include.nss": b"int Helper() { return 1; }",
+    }
+
+    class FakeKeyReader:
+        filenames = tuple(archive)
+
+        def __init__(self, path: str) -> None:
+            pass
+
+        def read_file(self, name: str) -> bytes:
+            return archive[name]
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(script_compile, "KeyReader", FakeKeyReader)
+    game = tmp_path / "game"
+    (game / "data").mkdir(parents=True)
+    (game / "data" / "nwn_base.key").write_bytes(b"unchanged key")
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    (scripts / "caller.nss").write_text('#include "base_include"\nvoid main() {}')
+
+    assert _compiled_names(tmp_path, stateful, nwn_root=game) == ["caller.nss"]
+    assert _compiled_names(tmp_path, stateful, nwn_root=game) == []
+
+    archive[changed] += b"\n// changed"
+    assert _compiled_names(tmp_path, stateful, nwn_root=game) == ["caller.nss"]
+
+
+@pytest.mark.parametrize(
+    "previous_state",
+    [{"tracked": 1}, {"compiler": "other", "scripts": {"tracked": 1}}],
+)
+@pytest.mark.parametrize("remove_sources", [False, True])
+def test_outdated_state_keeps_output_ownership(
+    tmp_path: Path, previous_state: dict, remove_sources: bool
+) -> None:
+    """Invalidated state recompiles its scripts without sweeping other outputs."""
+
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    (scripts / "tracked.nss").write_text("void main() {}")
+    output = tmp_path / "output"
+    live = tmp_path / "live"
+    for directory in (output, live):
+        directory.mkdir()
+        (directory / "tracked.ncs").write_bytes(b"old")
+        (directory / "untracked.ncs").write_bytes(b"keep")
+    state = tmp_path / "state.json"
+    state.write_text(json.dumps(previous_state))
+    if remove_sources:
+        (scripts / "tracked.nss").unlink()
+        scripts.rmdir()
+
+    result = compile_scripts(
+        script_dir=scripts,
+        output_dir=output,
+        secondary_output_dir=live,
+        state_path=state,
+        compiler_factory=fake_compiler_factory,
+    )
+
+    assert result.compiled_count == int(not remove_sources)
+    for directory in (output, live):
+        assert (directory / "untracked.ncs").read_bytes() == b"keep"
+        assert (directory / "tracked.ncs").exists() != remove_sources
+    if not remove_sources:
+        assert (output / "tracked.ncs").read_bytes() == b"compiled:tracked"
+    assert set(json.loads(state.read_text())["scripts"]) == (
+        set() if remove_sources else {"tracked"}
+    )
+
+
+def test_interrupted_state_write_keeps_previous_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state = tmp_path / "state.json"
+    script_compile.write_hash_index(state, {"first": 1}, "compiler")
+    previous = state.read_bytes()
+
+    def interrupted_replace(*_args: object) -> None:
+        raise OSError("interrupted")
+
+    monkeypatch.setattr(script_compile.os, "replace", interrupted_replace)
+    with pytest.raises(CompileError):
+        script_compile.write_hash_index(state, {"second": 2}, "compiler")
+
+    assert state.read_bytes() == previous
+    assert list(tmp_path.iterdir()) == [state]
+
+
+# The native compiler also accepts an include without a space before the name.
+@pytest.mark.parametrize("directive", ['#include "inc_shared"', '#include"inc_shared"'])
+def test_cache_dir_compiles_each_source_and_include_combination_once(
+    tmp_path: Path, directive: str
+) -> None:
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    include = scripts / "inc_shared.nss"
+    include.write_text("int helper() { return 1; }")
+    (scripts / "dependent.nss").write_text(
+        f"{directive}\nvoid main() {{ int x = helper(); }}"
+    )
+    (scripts / "unrelated.nss").write_text("void main() {}")
+    compiled: list[str] = []
+
+    class RecordingCompiler:
+        def compile(self, script_name: str) -> bytes:
+            compiled.append(script_name)
+            return f"compiled:{script_name}".encode()
+
+    def compile_all(output_name: str) -> list[str]:
+        compiled.clear()
+        compile_scripts(
+            script_dir=scripts,
+            output_dir=tmp_path / output_name,
+            selector="all",
+            use_state=False,
+            cache_dir=tmp_path / "cache",
+            compiler_factory=lambda _resolver: RecordingCompiler(),
+        )
+        return sorted(compiled)
+
+    assert compile_all("first") == ["dependent.nss", "unrelated.nss"]
+    assert compile_all("second") == []
+    assert {
+        path.name: path.read_bytes() for path in (tmp_path / "second").iterdir()
+    } == {path.name: path.read_bytes() for path in (tmp_path / "first").iterdir()}
+
+    include.write_text("int helper() { return 2; }")
+    assert compile_all("changed") == ["dependent.nss"]
+    assert compile_all("changed_again") == []
+
+    include.write_text("int helper() { return 1; }")
+    assert compile_all("reverted") == []
+
+
+@pytest.mark.parametrize("stateful", [False, True])
+def test_project_nwscript_override_invalidates_cached_outputs(
+    tmp_path: Path, stateful: bool
+) -> None:
+    """The compiler reads nwscript.nss implicitly, even when no script includes it."""
+
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    nwscript = scripts / "nwscript.nss"
+    nwscript.write_text("void First();\nvoid Second();")
+    (scripts / "caller.nss").write_text("void main() { Second(); }")
+
+    assert _compiled_names(tmp_path, stateful) == ["caller.nss"]
+    assert _compiled_names(tmp_path, stateful) == []
+
+    nwscript.write_text("void Second();\nvoid First();")
+    assert _compiled_names(tmp_path, stateful) == ["caller.nss"]
+
+
+def _compiled_names(tmp_path: Path, stateful: bool, **options: object) -> list[str]:
+    """Compile tmp_path/scripts with saved state or a cache; return what compiled."""
+
+    compiled: list[str] = []
+
+    class RecordingCompiler:
+        def compile(self, script_name: str) -> bytes:
+            compiled.append(script_name)
+            return f"compiled:{script_name}".encode()
+
+    compile_scripts(
+        script_dir=tmp_path / "scripts",
+        output_dir=tmp_path / "output",
+        selector=None if stateful else "all",
+        state_path=tmp_path / "state.json",
+        use_state=stateful,
+        cache_dir=None if stateful else tmp_path / "cache",
+        compiler_factory=lambda _resolver: RecordingCompiler(),
+        **options,
+    )
+    return compiled
