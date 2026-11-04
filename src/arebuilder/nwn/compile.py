@@ -899,7 +899,7 @@ class StatefulScriptCompiler:
             with init_lock:
                 thread_local.compiler = self.compiler_factory(self.load_script)
 
-        errors: list[str] = []
+        errors: list[CompilationError] = []
 
         def compile_in_thread(script: Script) -> tuple[str, bytes | None]:
             """Compile one script inside the worker pool and normalize backend return shapes."""
@@ -924,7 +924,7 @@ class StatefulScriptCompiler:
                     progress.close()
                 print(f"\n{error.message.splitlines()[0].split(' [')[0]}")
                 # Keep compiling so one run reports every broken script.
-                errors.append(script.name)
+                errors.append(error)
                 return f"{script.name}.ncs", None
 
         try:
@@ -955,7 +955,9 @@ class StatefulScriptCompiler:
             traceback.print_exc()
             raise CompileError("\nStopping processing.") from exc
         if errors:
-            raise CompileError(f"\n{len(errors)} error(s); see above for context.")
+            raise CompileError(
+                f"\n{len(errors)} error(s); see above for context."
+            ) from errors[0]
 
         if clear_output:
             self.clear_output_folders()

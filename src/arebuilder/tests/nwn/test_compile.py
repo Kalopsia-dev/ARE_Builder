@@ -255,7 +255,7 @@ def test_compile_reports_every_failed_script(
         _write_script(script_dir / f"{name}.nss", "void main() { int x = ; }")
     _write_script(script_dir / "valid.nss", "void main() {}")
 
-    with pytest.raises(CompileError, match=r"2 error\(s\)"):
+    with pytest.raises(CompileError, match=r"2 error\(s\)") as exc_info:
         compile_scripts(
             script_dir=script_dir,
             output_dir=tmp_path / "compiled",
@@ -265,6 +265,8 @@ def test_compile_reports_every_failed_script(
             ci=True,
         )
 
+    # Library callers can still reach the native compiler diagnostic.
+    assert isinstance(exc_info.value.__cause__, script_compile.CompilationError)
     assert "Compiling valid.nss" in capsys.readouterr().out
     assert not (tmp_path / "compiled").exists()
 
